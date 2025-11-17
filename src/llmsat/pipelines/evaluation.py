@@ -1,10 +1,26 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from dataclasses import dataclass
-from llmsat.utils.aws import get_algorithm_result
-from llmsat.llmsat import CodeResult, AlgorithmResult, BASE_SOLVER_PATH, get_logger
+from typing import Dict, List
+
+from llmsat.llmsat import (
+    AlgorithmResult,
+    BASE_SOLVER_PATH,
+    CodeResult,
+    SAT2025_BENCHMARK_PATH,
+    get_logger,
+)
+from llmsat.utils.aws import (
+    get_algorithm_result,
+    get_code_result,
+    update_algorithm_result,
+    update_code_result,
+)
+from llmsat.utils.paths import get_solver_dir, get_solver_solving_times_path
+from llmsat.utils.utils import wrap_command_to_slurm, get_activate_python_path
 from llmsat.evaluation.coder import Coder
 from ..evaluation.algorithm_evaluator import AlgorithmEvaluator
 from ..evaluation.code_evaluator import CodeEvaluator
@@ -51,83 +67,100 @@ class EvaluationPipeline:
         solver_dir = get_solver_dir(algorithm_id, code_id)
         shutil.rmtree(solver_dir)
 
-    def collect_results(self, algorithm_id: str, code_id: str) -> None:
+    def collect_results(self, algorithm_id: str, code_id: str) -> float:
         # collect the results from the solver
         solver_dir = get_solver_dir(algorithm_id, code_id)
+        solving_times = {}
         for file in os.listdir(solver_dir):
-            solving_time = {}
             if file.endswith(".solving.log"):
                 instance_name = file.split(".")[0]
                 with open(f"{solver_dir}/{file}", "r") as f:
                     content = f.read()
-                solving_time = parse_solving_time(content)
-                solving_time[instance_name] = solving_time
-            par2 = average(solving_time.values())
+                time_value = parse_solving_time(content)
+                if time_value is not None:
+                    solving_times[instance_name] = time_value
+
+        # Compute PAR2 score (average of solving times, with penalty for timeouts)
+        if solving_times:
+            par2 = sum(solving_times.values()) / len(solving_times)
+        else:
+            par2 = float('inf')  # No results means infinite PAR2
 
         # update the code result and algorithm result
         code_result = get_code_result(code_id)
-        code_result.par2 = par2
-        code_result.solving_time = str(solving_time)
-        update_code_result(code_result)
+        if code_result:
+            code_result.par2 = par2
+            code_result.solving_time = json.dumps(solving_times)
+            update_code_result(code_result)
+
         algorithm_result = get_algorithm_result(algorithm_id)
-        algorithm_result.par2 = par2
-        update_algorithm_result(algorithm_result)
+        if algorithm_result:
+            algorithm_result.par2 = par2
+            update_algorithm_result(algorithm_result)
+
+        # Save solving times to file
         with open(get_solver_solving_times_path(algorithm_id, code_id), "w") as f:
-            json.dump(solving_time, f)
+            json.dump(solving_times, f, indent=2)
+
         return par2
 
     def slurm_colloct_result(self, slurm_ids: List[str], code_id: str) -> None:
         activate_python_path = get_activate_python_path()
         pass
 
-    def build_solver(self, code_result: CodeResult) -> None:
-        code = code_result.code
-        # copy original solver to a new folder
-        new_solver_path = get_solver_dir(code_result.algorithm_id, code_result.id)
-        shutil.copytree(BASE_SOLVER_PATH, new_solver_path)
-        # replace the code in the new solver
-        restart_file = f"{new_solver_path}/src/restart.c"
-        # First read the file to find where to insert the code
-        with open(restart_file, "r") as f:
-            lines = f.readlines()
-        
-        # Find the insertion point (after "//LLMSAT start")
-        insert_idx = None
-        for i, line in enumerate(lines):
-            if line.startswith("//LLMSAT start"):
-                insert_idx = i + 1  # Insert after this line
-                break
-        
-        if insert_idx is None:
-            raise ValueError("Could not find '//LLMSAT start' marker in restart.c")
-        
-        # Write the modified content
-        with open(restart_file, "w") as f:
-            # Write lines before insertion point
-            f.writelines(lines[:insert_idx])
-            # Write the new code
-            f.write(code)
-            f.write("\n")
-            # Write the remaining lines
-            f.writelines(lines[insert_idx:])
+    def build_solver(self, code_result: CodeResult) -> Optional[str]:
+        """
+        Build solver with modified restart.c file.
 
-        # try compile the solver
+        Args:
+            code_result: CodeResult containing the complete restart.c file content
+
+        Returns:
+            Path to built solver if successful, None otherwise
+        """
+        code = code_result.code
+
+        # Copy original solver to a new folder
+        new_solver_path = get_solver_dir(code_result.algorithm_id, code_result.task_id)
+        logger.info(f"Copying base solver to {new_solver_path}")
+        shutil.copytree(BASE_SOLVER_PATH, new_solver_path)
+
+        # Simply replace the entire restart.c file
+        restart_file = f"{new_solver_path}/src/restart.c"
+        logger.info(f"Replacing restart.c with generated code ({len(code)} chars)")
+        with open(restart_file, "w") as f:
+            f.write(code)
+
+        # Try to compile the solver
+        logger.info("Compiling solver with make...")
         try:
-            output = os.popen(f"cd {new_solver_path} && make").read()
-            if "error" in output:
+            output = os.popen(f"cd {new_solver_path} && make 2>&1").read()
+
+            # Check for errors in build output
+            if "error:" in output.lower() or "fatal" in output.lower():
+                logger.error(f"Build failed with errors:\n{output}")
                 build_success = False
             else:
+                logger.info("Build succeeded")
                 build_success = True
         except Exception as e:
+            logger.error(f"Build exception: {e}")
             build_success = False
+
+        # Update code_result with build status
+        code_result.build_success = build_success
+
         if build_success:
             new_solver_bin_path = f"{new_solver_path}/build/kissat"
-            os.makedirs(f"solvers/algorithm_{code_result.algorithm_id}/code_{code_result.id}", exist_ok=True)
-            os.copy(new_solver_bin_path, f"solvers/algorithm_{code_result.algorithm_id}/code_{code_result.id}/kissat")
-            return new_solver_path
+            if os.path.exists(new_solver_bin_path):
+                logger.info(f"Solver binary created at {new_solver_bin_path}")
+                return new_solver_path
+            else:
+                logger.error(f"Build reported success but binary not found at {new_solver_bin_path}")
+                return None
         else:
-            return None
-        return 
+            logger.error("Build failed")
+            return None 
 
     def slurm_run_evaluate(self, solver_path: str, benchmark_path: str) -> None:
         # run the solver on the benchmark
