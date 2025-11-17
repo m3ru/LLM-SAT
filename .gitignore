@@ -1,0 +1,8 @@
+# Ignore all Markdown files (Claude Code generated)
+*.md
+
+# If there are specific markdown files you *do* want to keep,
+# you can whitelist them like this:
+# !README.md
+# !docs/keep-this.md
+

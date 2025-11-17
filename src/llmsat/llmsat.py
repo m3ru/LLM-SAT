@@ -1,5 +1,8 @@
+import hashlib
+import json
 import logging
 from dataclasses import dataclass
+from typing import Dict, List
 
 NOT_INITIALIZED = -1
 BASE_SOLVER_PATH = "solvers/base"
