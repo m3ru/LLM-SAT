@@ -3,3 +3,7 @@ models/
 solvers/algorithm_*/
 data/benchmarks/*
 !data/benchmarks/**/*.uri
+logs/
+*.pyc
+solvers/base
+solvers/test
