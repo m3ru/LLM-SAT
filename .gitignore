@@ -8,3 +8,4 @@ logs/
 *.pyc
 solvers/base
 solvers/test
+.env

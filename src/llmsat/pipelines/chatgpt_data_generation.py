@@ -287,7 +287,7 @@ def fake_generate_data(designer_prompt_path: str, code_prompt_template_path: str
                 algorithm_result.code_id_list.append(cid)
         update_algorithm_result(algorithm_result)
 
-def generate_data(designer_prompt_path: str, code_prompt_template_path: str, generation_tag: str, n_algorithms: int = 500, n_codes: int = 10, use_cache=False, model: str = "gpt-4.1"):
+def generate_data(designer_prompt_path: str, code_prompt_template_path: str, generation_tag: str, n_algorithms: int = 500, n_codes: int = 10, use_cache=False, model: str = "gpt-4o"):
     if generation_tag is None:
         logger.error("Generation tag is None")
         return
@@ -413,6 +413,15 @@ def print_generation_result(generation_tag: str):
                     data = json.load(f)
                     print(f"data: {data}")
 
+def main():
+    generate_data(
+        generation_tag="chatgpt_data_generation_gpt4o_2",
+        designer_prompt_path="./data/prompts/kissat.txt",
+        code_prompt_template_path="./data/prompts/kissat_code.txt",
+        n_algorithms=5, n_codes=10,
+        model="gpt-4o",
+    )
+
 def test():
     # print_generation_result("chatgpt_data_generation_gpt4o_2")
     # print_generation_result("chatgpt_data_generation_gpt5_2")
@@ -464,4 +473,4 @@ def test():
     
 
 if __name__ == "__main__":
-    test()
+    main()
