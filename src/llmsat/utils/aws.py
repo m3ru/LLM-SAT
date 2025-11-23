@@ -80,7 +80,21 @@ def get_all_tasks():
     cur.execute("SELECT * FROM tasks;")
     return cur.fetchall()
 
-def get_code_result(code_result_id: str):
+def remove_code_result(code_result_id: str):
+    conn = connect_to_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM code_results WHERE id = %s;", (code_result_id,))
+    conn.commit()
+    pass
+
+def remove_algorithm_result(algorithm_result_id: str):
+    conn = connect_to_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM algorithm_results WHERE id = %s;", (algorithm_result_id,))
+    conn.commit()
+    pass
+
+def get_code_result(code_result_id: str) -> Optional[CodeResult]:
     conn = connect_to_db()
     cur = conn.cursor()
     cur.execute("SELECT * FROM code_results WHERE id = %s;", (code_result_id,))
@@ -91,6 +105,13 @@ def get_code_result(code_result_id: str):
     else:
         return None
 
+def get_algorithms_by_prompt(prompt: str) -> List[AlgorithmResult]:
+    conn = connect_to_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM algorithm_results WHERE prompt = %s;", (prompt,))
+    rows = cur.fetchall()
+    return [ToAlgorithmResult(row) for row in rows]
+
 def get_algorithm_result(algorithm_result_id: str):
     conn = connect_to_db()
     cur = conn.cursor()
@@ -98,7 +119,7 @@ def get_algorithm_result(algorithm_result_id: str):
     assert cur.rowcount <= 1, "hash collision"
     if cur.rowcount == 1:
         row = cur.fetchone()
-        logger.info(f"Retrieved algorithm result {row}")
+        # logger.info(f"Retrieved algorithm result {row}")
         return ToAlgorithmResult(row)
     else:
         return None
@@ -175,7 +196,7 @@ def init_tables():
     conn = connect_to_db()
     cur = conn.cursor()
     cur.execute("CREATE TABLE IF NOT EXISTS algorithm_results (id TEXT PRIMARY KEY, algorithm TEXT, code_id_list TEXT, status TEXT, last_updated TEXT, prompt TEXT, par2 TEXT, error_rate TEXT, other_metrics TEXT);")
-    cur.execute("CREATE TABLE IF NOT EXISTS code_results (id TEXT PRIMARY KEY, code TEXT, algorithm TEXT, status TEXT, last_updated TEXT, solver_id TEXT, build_success TEXT);")
+    cur.execute("CREATE TABLE IF NOT EXISTS code_results (id TEXT PRIMARY KEY, code TEXT, algorithm TEXT, status TEXT, last_updated TEXT, solver_id TEXT, build_success TEXT, par2 TEXT);")
     conn.commit()
     pass
 
@@ -209,7 +230,8 @@ def ToCodeResult(result: tuple) -> CodeResult:
             code=result[1],
             status=result[3],
             last_updated=result[4],
-            build_success=_to_bool(result[6]))
+            build_success=_to_bool(result[6]),
+            par2=_to_float(result[7]))
 
 def get_all_algorithm_results() -> List[AlgorithmResult]:
     conn = connect_to_db()
@@ -327,6 +349,7 @@ def _row_to_code_result(row: Mapping[str, Any]) -> CodeResult:
         status=row.get("status"),
         last_updated=row.get("last_updated"),
         build_success=_to_bool(row.get("build_success")),
+        par2=_to_float(row.get("par2")),
     )
     
 def _row_to_algorithm_result(row: Mapping[str, Any]) -> AlgorithmResult:
@@ -342,6 +365,63 @@ def _row_to_algorithm_result(row: Mapping[str, Any]) -> AlgorithmResult:
         other_metrics=_to_other_metrics(row.get("other_metrics")),
     )
 
+def add_router_table(name: str):
+    # router tables has: id, type
+    conn = connect_to_db()
+    cur = conn.cursor()
+    cur.execute(f"CREATE TABLE IF NOT EXISTS {name} (id TEXT PRIMARY KEY, type TEXT);")
+    conn.commit()
+    pass
+
+def update_router_table(name: str, id: str, type: str):
+    conn = connect_to_db()
+    cur = conn.cursor()
+    # if exists, update, if not insert
+    cur.execute(f"SELECT * FROM {name} WHERE id = %s;", (id,))
+    if cur.rowcount > 0:
+        cur.execute(f"UPDATE {name} SET type = %s WHERE id = %s;", (type, id))
+    else:
+        cur.execute(f"INSERT INTO {name} (id, type) VALUES (%s, %s);", (id, type))
+    conn.commit()
+    pass
+
+def get_ids_from_router_table(name: str, type: str) -> List[str]:
+    conn = connect_to_db()
+    cur = conn.cursor()
+    if type is None:
+        cur.execute(f"SELECT id FROM {name};")
+    else:
+        cur.execute(f"SELECT id FROM {name} WHERE type = %s;", (type,))
+    rows = cur.fetchall()
+    return list(set([row[0] for row in rows]))
+
+def clear_router_table(name: str):
+    conn = connect_to_db()
+    cur = conn.cursor()
+    cur.execute(f"DELETE FROM {name};")
+    conn.commit()
+    pass
+
+def add_par2_to_code_results_table():
+    conn = connect_to_db()
+    cur = conn.cursor()
+    cur.execute("ALTER TABLE code_results ADD COLUMN par2 TEXT;")
+    conn.commit()
+    pass
+
+def backup_db():
+    conn = connect_to_db()
+    cur = conn.cursor()
+    # create another tables
+    cur.execute("CREATE TABLE IF NOT EXISTS algorithm_results_backup (id TEXT PRIMARY KEY, algorithm TEXT, code_id_list TEXT, status TEXT, last_updated TEXT, prompt TEXT, par2 TEXT, error_rate TEXT, other_metrics TEXT);")
+    cur.execute("CREATE TABLE IF NOT EXISTS code_results_backup (id TEXT PRIMARY KEY, code TEXT, algorithm TEXT, status TEXT, last_updated TEXT, solver_id TEXT, build_success TEXT);")
+    # copy the data from the original tables to the new tables
+    cur.execute("INSERT INTO algorithm_results_backup SELECT * FROM algorithm_results;")
+    cur.execute("INSERT INTO code_results_backup SELECT * FROM code_results;")
+    conn.commit()
+    pass
+
+
 if __name__ == "__main__":
     setup_logging()
     parser = argparse.ArgumentParser(description="AWS utils")
@@ -351,6 +431,8 @@ if __name__ == "__main__":
     parser.add_argument("--test", action="store_true", help="Test the utils")
     parser.add_argument("--reset", action="store_true", help="Reset the tables")
     parser.add_argument("--show_code_results", type=str, help="Show the code results")
+    parser.add_argument("--backup", action="store_true", help="Backup the tables")
+    parser.add_argument("--add_router_table", type=str, default=None, help="Add a router table")
     args = parser.parse_args()
     if args.show_code_results:
         code_results = get_code_result(args.show_code_results)
@@ -366,5 +448,9 @@ if __name__ == "__main__":
     elif args.reset:
         delete_tables()
         init_tables()
+    elif args.backup:
+        backup_db()
+    elif args.add_router_table:
+        add_router_table(args.add_router_table)
     else:
         print("No action specified")

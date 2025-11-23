@@ -1,8 +1,10 @@
 import argparse
 import os
 import re
+from datetime import datetime
 solver = "./solvers/kissat/build/kissat"
 benchmark = "./data/benchmarks/satcomp2025/"
+
 
 def parse_solving_time(file_path: str):
     lines = open(file_path, "r").readlines()
@@ -18,14 +20,21 @@ def parse_solving_time(file_path: str):
     return 5000
 
 def run_baseline():
+    time=datetime.now().strftime("%Y%m%d%H%M%S")
     for file in os.listdir(benchmark):
         if file.endswith(".cnf"):
             name = file.split(".")[0]
             output_file = f"./data/results/baseline/{name}.out"
             cmd = f"{solver} {benchmark}/{file} > {output_file}"
-            sbatch_cmd = f"sbatch --time=00:00:5000 --mem=8G --cpus-per-task=1 --job-name=baseline_{name} --output={output_file}.log --error={output_file}.log --wrap=\"{cmd}\""
-            os.system(sbatch_cmd)
-        # exit()
+            # sbatch_cmd = f"sbatch --time=00:00:5000 --mem=8G --cpus-per-task=1 --job-name=baseline_{name} --output={output_file}.log --error={output_file}.log --wrap=\"{cmd}\""
+            # run locally with 2000s timeout
+            batch_cmd = f"timeout 2000 {cmd}"
+            os.system(batch_cmd)
+    now=datetime.now().strftime("%Y%m%d%H%M%S")
+    cost=now-time
+    print(f"Finished running baseline at {now}")
+    print(f"Cost: {cost} seconds = {cost/60} minutes = {cost/3600} hours")
+    # exit()
 # 
 def collect_results():
     solving_times = {}
@@ -40,5 +49,5 @@ def collect_results():
     return solving_times
 
 if __name__ == "__main__":
-    # run_baseline()
-    collect_results()
+    run_baseline()
+    # collect_results()

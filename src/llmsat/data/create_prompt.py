@@ -34,6 +34,13 @@ import uuid as uuidlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional
+import time
+from llmsat.utils.chatgpt_helper import (
+    submit_batch_input as helper_submit_batch_input,
+    block_until_completion as helper_block_until_completion,
+    download_batch_outputs as helper_download_batch_outputs,
+    _get_openai_client as _helper_get_openai_client,
+)
 
 
 @dataclass
@@ -179,7 +186,7 @@ def generate_records(cfg: GeneratorConfig) -> List[dict]:
     raise FileNotFoundError(f"Input path not found: {cfg.input_path}")
 
 
-def parse_args(argv: Optional[List[str]] = None) -> GeneratorConfig:
+def parse_args(argv: Optional[List[str]] = None) -> tuple[GeneratorConfig, argparse.Namespace]:
     parser = argparse.ArgumentParser(description="Generate JSONL batch inputs for OpenAI Responses API")
 
     parser.add_argument("-i", "--input", dest="input_path", type=str, default="data/prompt_heuristic.txt",
@@ -216,6 +223,24 @@ def parse_args(argv: Optional[List[str]] = None) -> GeneratorConfig:
     parser.add_argument("--per-line", dest="per_line", action="store_true", default=False,
                         help="If set, treat each non-empty line in a file as a single prompt.")
 
+    # Submission and retrieval options
+    parser.add_argument("--submit", dest="submit", action="store_true", default=False,
+                        help="Submit the generated JSONL to OpenAI Batches API.")
+    parser.add_argument("--block", dest="block", action="store_true", default=False,
+                        help="When used with --submit, wait until the batch finishes and update meta.")
+    parser.add_argument("--poll-interval", dest="poll_interval", type=int, default=60,
+                        help="Polling interval in seconds when --block is used (default: 60).")
+    parser.add_argument("--timeout", dest="timeout", type=int, default=24 * 60 * 60,
+                        help="Timeout in seconds when --block is used (default: 24h).")
+    parser.add_argument("--retrieve-status", dest="retrieve_status", type=str, default=None,
+                        help="Retrieve and print status for a given batch id, then exit.")
+    parser.add_argument("--download", dest="download_batch_id", type=str, default=None,
+                        help="Download outputs for a given batch id.")
+    parser.add_argument("--download-output", dest="download_output", type=str, default=None,
+                        help="Output file path for downloaded results (with --download or --download-from-sidecar).")
+    parser.add_argument("--download-from-sidecar", dest="download_from_sidecar", type=str, default=None,
+                        help="Download outputs using a sidecar meta path or the prompt JSONL path.")
+
     args = parser.parse_args(argv)
     if args.output_path is None:
         args.output_path = args.input_path.replace(".txt", "batchinput.jsonl")
@@ -223,7 +248,7 @@ def parse_args(argv: Optional[List[str]] = None) -> GeneratorConfig:
     output_path = Path(args.output_path) if args.output_path else None
     system_file = Path(args.system_file) if args.system_file else None
 
-    return GeneratorConfig(
+    cfg = GeneratorConfig(
         input_path=input_path,
         output_path=output_path,
         system_message=args.system_message,
@@ -240,11 +265,113 @@ def parse_args(argv: Optional[List[str]] = None) -> GeneratorConfig:
         per_line=args.per_line,
         target_count=args.target_count,
     )
+    return cfg, args
 
+def submit_to_openai(prompt_file: Path, block: bool = False, poll_interval_seconds: int = 60, timeout_seconds: int = 24 * 60 * 60) -> None:
+    """
+    Submit a JSONL batch input file to OpenAI Batches API.
+    The JSONL should contain lines like:
+      {"custom_id": str, "method": "POST", "url": "/v1/responses", "body": {...}}
+    On success, writes a sidecar metadata file next to the input with IDs.
+    """
+    if not isinstance(prompt_file, Path):
+        prompt_file = Path(prompt_file)
+    if not prompt_file.exists():
+        raise FileNotFoundError(f"Prompt file not found: {prompt_file}")
+    # 1) Submit via shared helper (non-blocking first)
+    batch_id = helper_submit_batch_input(str(prompt_file), block=False)
+    # 2) Persist minimal metadata for retrieval later
+    meta = {
+        "batch_id": batch_id,
+        "status": "submitted",
+        "input_file_id": None,
+        "created_at": int(time.time()),
+        "source_path": str(prompt_file),
+    }
+    sidecar = prompt_file.with_suffix(".batch.meta.json")
+    sidecar.write_text(json.dumps(meta, ensure_ascii=False, indent=2))
+
+    print(f"Submitted batch. batch_id={meta['batch_id']} input_file_id={meta['input_file_id']} sidecar={sidecar}")
+
+    # Optionally block until completion and update meta with final details
+    if block and meta["batch_id"]:
+        final_status = helper_block_until_completion(meta["batch_id"], poll_interval_seconds=poll_interval_seconds, timeout_seconds=timeout_seconds)
+        # refresh batch info and update sidecar
+        client = _helper_get_openai_client()
+        batch = client.batches.retrieve(meta["batch_id"])
+        meta.update({
+            "final_status": getattr(batch, "status", final_status),
+            "output_file_id": getattr(batch, "output_file_id", None),
+            "error_file_id": getattr(batch, "error_file_id", None),
+            "completed_at": int(time.time()),
+        })
+        sidecar.write_text(json.dumps(meta, ensure_ascii=False, indent=2))
+        print(f"Batch finished with status={meta['final_status']}. Sidecar updated: {sidecar}")
+
+def retrieve_batch_status(batch_id: str) -> str:
+    """
+    Retrieve and print the current status of a batch.
+    Returns the status string.
+    """
+    client = _helper_get_openai_client()
+    batch = client.batches.retrieve(batch_id)
+    status = getattr(batch, "status", "unknown")
+    print(f"Batch {getattr(batch, 'id', batch_id)} status: {status}")
+    return status
+
+def read_sidecar_meta(meta_path: Path) -> dict:
+    """
+    Read a sidecar metadata JSON produced by submit_to_openai.
+    """
+    if not isinstance(meta_path, Path):
+        meta_path = Path(meta_path)
+    if not meta_path.exists():
+        raise FileNotFoundError(f"Meta file not found: {meta_path}")
+    return json.loads(meta_path.read_text(encoding="utf-8"))
+
+def sidecar_path_for_prompt(prompt_file: Path) -> Path:
+    """
+    Compute the sidecar path used by submit_to_openai for a given prompt file.
+    """
+    if not isinstance(prompt_file, Path):
+        prompt_file = Path(prompt_file)
+    return prompt_file.with_suffix(".batch.meta.json")
+
+def download_from_sidecar(meta_or_prompt_path: Path, output_path: Optional[Path] = None) -> Path:
+    """
+    Convenience method: given either the sidecar .batch.meta.json path or the original
+    prompt file path, download the batch outputs to a default or specified path.
+    Default output path is '<base>.batch.output.jsonl' next to the sidecar.
+    """
+    path = Path(meta_or_prompt_path)
+    if path.suffix == ".json" and path.name.endswith(".batch.meta.json"):
+        meta_path = path
+    else:
+        meta_path = sidecar_path_for_prompt(path)
+    meta = read_sidecar_meta(meta_path)
+    batch_id = meta.get("batch_id")
+    if not batch_id:
+        raise RuntimeError(f"No batch_id found in meta: {meta_path}")
+    if output_path is None:
+        output_path = meta_path.with_suffix(".batch.output.jsonl")
+    return helper_download_batch_outputs(batch_id, Path(output_path))
 
 def main(argv: Optional[List[str]] = None) -> int:
-    cfg = parse_args(argv)
+    cfg, args = parse_args(argv)
     try:
+        # Retrieval-only operations short-circuit
+        if args.retrieve_status:
+            retrieve_batch_status(args.retrieve_status)
+            return 0
+        if args.download_from_sidecar:
+            out_path = Path(args.download_output) if args.download_output else None
+            download_from_sidecar(Path(args.download_from_sidecar), out_path)
+            return 0
+        if args.download_batch_id:
+            out_path = Path(args.download_output) if args.download_output else Path(f"{args.download_batch_id}.output.jsonl")
+            helper_download_batch_outputs(args.download_batch_id, out_path)
+            return 0
+
         # write exactly 1k records to one file (replicate if needed)
         base_records = generate_records(cfg)
 
@@ -283,6 +410,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                     total_written += 1
 
             write_jsonl(replicated, cfg.output_path)
+
+        # Optionally submit (non-blocking or blocking)
+        if args.submit:
+            submit_to_openai(cfg.output_path, block=args.block, poll_interval_seconds=args.poll_interval, timeout_seconds=args.timeout)
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

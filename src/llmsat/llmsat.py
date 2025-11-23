@@ -7,6 +7,11 @@ BASE_SOLVER_PATH = "solvers/base"
 RECOVERED_ALGORITHM = "recovered_algorithm"
 SAT2025_BENCHMARK_PATH = "data/benchmarks/satcomp2025"
 PYENV_PATH = "../../general/bin/activate"
+CHATGPT_DATA_GENERATION_TABLE = "chatgpt_datagen"
+
+#DATATYPES
+ALGORITHM = "algorithm"
+CODE = "code"
 
 class CodeStatus:
     Pending = "pending" # generating
@@ -33,6 +38,8 @@ class AlgorithmResult:
     algorithm: str
     status: str
     last_updated: str
+    # tag: str
+    # designer: str
     prompt: str # not implemented yet
     par2: list[float]
     error_rate: float
@@ -45,8 +52,11 @@ class CodeResult:
     algorithm_id: str
     code: str
     status: str
+    par2: float
+    # tag: str
+    # coder: str
     last_updated: str
-    build_success: bool
+    build_success: bool = NOT_INITIALIZED
 
 def get_id(input_str: str) -> str:
 

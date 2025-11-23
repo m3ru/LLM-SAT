@@ -9,10 +9,11 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 import argparse
 from datetime import datetime
-from llmsat.llmsat import NOT_INITIALIZED
+from llmsat.llmsat import NOT_INITIALIZED, CHATGPT_DATA_GENERATION_TABLE, ALGORITHM
 from llmsat.utils.aws import (
     get_algorithm_result,
     get_algorithm_result_of_status,
+    get_ids_from_router_table,
     get_code_result,
     get_code_result_of_status,
     update_code_result,
@@ -190,6 +191,25 @@ class EvaluationPipeline:
 
 
     def filter_code(self, code: str) -> str:
+        def normalize_escaped_whitespace(text: str) -> str:
+            # Heuristic: if we see many literal '\n' and very few real newlines, unescape once
+            literal_newlines = text.count("\\n")
+            real_newlines = text.count("\n")
+            if literal_newlines >= 3 and real_newlines < 3:
+                try:
+                    # Attempt a single unicode escape decode
+                    decoded = bytes(text, "utf-8").decode("unicode_escape")
+                    return decoded
+                except Exception:
+                    # Fallback to simple replacements
+                    text = text.replace("\\r\\n", "\n")
+                    text = text.replace("\\n", "\n")
+                    text = text.replace("\\t", "\t")
+                    text = text.replace('\\"', '"')
+                    return text
+            # Also normalize Windows line endings if present
+            return text.replace("\r\n", "\n")
+
         def extract_function(text: str, func_name: str) -> Optional[str]:
             # Try to find a reasonable C function header for 'bool kissat_restarting'
             # Allow optional qualifiers like 'static' or 'inline'
@@ -247,6 +267,9 @@ class EvaluationPipeline:
         else:
             logger.warning("No <code> tag found in code")
 
+        # Normalize escaped whitespace (e.g., literal '\n') before parsing/writing
+        code = normalize_escaped_whitespace(code)
+
         if "kissat_restarting" not in code:
             logger.error("No kissat_restarting function found in code")
             return None
@@ -277,27 +300,32 @@ class EvaluationPipeline:
         with open(restart_file, "r") as f:
             lines = f.readlines()
         
-        # Find the insertion point (after "//LLMSAT start")
-        insert_idx = None
+        # Find LLMSAT start/end markers and replace the block between them
+        start_idx = None
+        end_idx = None
         for i, line in enumerate(lines):
-            # Support both markers: "//LLMSAT start" and "// LLMSAT: start"
-            if line.startswith("//LLMSAT start") or line.strip().startswith("// LLMSAT: start"):
-                insert_idx = i + 1  # Insert after this line
+            stripped = line.strip()
+            if start_idx is None and (line.startswith("//LLMSAT start") or stripped.startswith("// LLMSAT: start")):
+                start_idx = i
+                continue
+            if start_idx is not None and (line.startswith("//LLMSAT end") or stripped.startswith("// LLMSAT: end")):
+                end_idx = i
                 break
         
-        if insert_idx is None:
+        if start_idx is None:
             raise ValueError("Could not find '//LLMSAT start' marker in restart.c")
-        logger.debug(f"Found insertion index at line {insert_idx} in restart.c")
-        
-        # Write the modified content
+        if end_idx is None:
+            raise ValueError("Could not find '//LLMSAT end' marker in restart.c")
+        logger.debug(f"Replacing lines ({start_idx+1}, {end_idx}) in restart.c between LLMSAT markers")
+
+        # Write the modified content: keep start marker line, replace inner block, keep end marker and rest
         with open(restart_file, "w") as f:
-            # Write lines before insertion point
-            f.writelines(lines[:insert_idx])
-            # Write the new code
-            f.write(code)
-            f.write("\n")
-            # Write the remaining lines
-            f.writelines(lines[insert_idx:])
+            # Up to and including start marker
+            f.writelines(lines[: start_idx + 1])
+            # New code block (ensure trailing newline)
+            f.write(code.rstrip() + "\n")
+            # From end marker to end (preserve end marker)
+            f.writelines(lines[end_idx:])
         logger.debug(f"Injected code into {restart_file}")
 
         # try compile the solver
@@ -320,7 +348,8 @@ class EvaluationPipeline:
                 build_success = make_proc.returncode == 0
             else:
                 build_success = False
-
+            # print(build_success)
+            # exit()
             # Aggregate logs from both phases (always record)
             logs = []
             logs.append("=== ./configure stdout ===\n" + (configure_proc.stdout or ""))
@@ -388,9 +417,9 @@ class EvaluationPipeline:
         if code_result is None:
             logger.error(f"Code result not found for code_id={code_id}")
             return
-        if code_result.status == CodeStatus.BuildFailed:
-            logger.warning(f"Code result {code_id} is already build failed, skip?")
-            return
+        # if code_result.status == CodeStatus.BuildFailed:
+        #     logger.warning(f"Code result {code_id} is already build failed, skip?")
+        #     return
         if code_result.status == CodeStatus.Evaluating:
             logger.warning(f"Code result {code_id} is already evaluating, skip")
             return
@@ -430,8 +459,8 @@ class EvaluationPipeline:
         for code_id in code_id_list:
             logger.info(f"Starting evaluation for code_id={code_id}")
             self.run_single_solver(code_id)
-        # algorithm.status = AlgorithmStatus.Evaluating
-        # update_algorithm_result(algorithm)
+        algorithm.status = AlgorithmStatus.Evaluating
+        update_algorithm_result(algorithm)
 
         # for code_id in code_id_list:
         #     logger.debug(f"Starting evaluation for code_id={code_id}")
@@ -573,7 +602,9 @@ def main():
 
     if args.run_all:
         assert args.algorithm_id is None, "Cannot specify both --algorithm_id and --run_all"
-        algorithms = get_algorithm_result_of_status(AlgorithmStatus.Generated)
+        # algorithms = get_algorithm_result_of_status(AlgorithmStatus.Generated)
+        algorithm_ids = get_ids_from_router_table(CHATGPT_DATA_GENERATION_TABLE, "chatgpt_data_generation_gpt5_2")
+        algorithms = [get_algorithm_result(algorithm_id) for algorithm_id in algorithm_ids]
         # algorithms = get_algorithm_result_of_status(AlgorithmStatus.CodeGenerated)
         logger.info(f"Found {len(algorithms)} algorithms to evaluate")
         if args.first_n is not None:
@@ -586,18 +617,24 @@ def main():
             return
     elif args.collect_all_results:
         assert args.algorithm_id is None, "Cannot specify both --algorithm_id and --collect_all_results"
-        code_results = get_code_result_of_status(CodeStatus.Evaluated)
-        code_ids = [code_result.id for code_result in code_results]
-        code_dirs = find_codes(code_ids)
-        algorithm_id_of_code_id = {}
-        for code_id, code_dir in code_dirs.items():
-            algorithm_id = code_dir.split("/")[-2].split("algorithm_")[1]
-            algorithm_id_of_code_id[code_id] = algorithm_id
-        for code_id in code_ids:
-            algorithm_id = algorithm_id_of_code_id[code_id]
-            evaluation_pipeline.collect_results(algorithm_id, code_id, force_recollect=True)
-            # return
-
+        # code_results = get_code_result_of_status(CodeStatus.Evaluated)
+        # code_ids = [code_result.id for code_result in code_results]
+        # code_dirs = find_codes(code_ids)
+        # algorithm_id_of_code_id = {}
+        # for code_id, code_dir in code_dirs.items():
+        #     algorithm_id = code_dir.split("/")[-2].split("algorithm_")[1]
+        #     algorithm_id_of_code_id[code_id] = algorithm_id
+        # for code_id in code_ids:
+        #     algorithm_id = algorithm_id_of_code_id[code_id]
+        #     evaluation_pipeline.collect_results(algorithm_id, code_id, force_recollect=True)
+        #     # return
+        algorithm_ids = get_ids_from_router_table(CHATGPT_DATA_GENERATION_TABLE, ALGORITHM)
+        for algorithm_id in algorithm_ids:
+            algorithm_result = get_algorithm_result(algorithm_id)
+            code_ids = algorithm_result.code_id_list
+            for code_id in code_ids:
+                evaluation_pipeline.collect_results(algorithm_id, code_id, force_recollect=True)
+                # return
         # restore_codes(list(algorithm_ids))
         # exit()
         # logger.info(f"code dirs: {code_dirs}")

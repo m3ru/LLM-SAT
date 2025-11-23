@@ -5,6 +5,16 @@ def get_solver_dir(algorithm_id: str, code_id: str) -> str:
 def get_algorithm_dir(algorithm_id: str) -> str:
     return f"solvers/algorithm_{algorithm_id}/"
 
+def get_batch_output_dir(generation_tag: str, batch_id: str) -> str:
+    if not os.path.exists(f"outputs/{generation_tag}/batch_{batch_id}/"):
+        os.makedirs(f"outputs/{generation_tag}/batch_{batch_id}/")
+    return f"outputs/{generation_tag}/batch_{batch_id}/"
+
+def get_generation_output_dir(generation_tag: str) -> str:
+    if not os.path.exists(f"outputs/{generation_tag}/"):
+        os.makedirs(f"outputs/{generation_tag}/")
+    return f"outputs/{generation_tag}/"
+
 def get_solver_result_dir(algorithm_id: str, code_id: str) -> str:
     if not os.path.exists(f"solvers/algorithm_{algorithm_id}/result/code_{code_id}/"):
         os.makedirs(f"solvers/algorithm_{algorithm_id}/result/code_{code_id}/")

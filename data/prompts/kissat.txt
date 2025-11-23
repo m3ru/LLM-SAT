@@ -1,53 +1,33 @@
 You are an AI researcher specializing in CDCL restart policies. Propose a new restart policy algorithm for the Kissat SAT solver.
 
+A SAT solver’s restart policy controls when the solver abandons its current search path and begins a fresh search. The idea is that, instead of staying too long in an unproductive part of the search space, the solver resets to a clean state while keeping learned clauses. Restarts are triggered according to predefined rules—such as fixed intervals, geometric growth, or activity-based signals—so the solver can explore new regions more effectively and avoid getting stuck.
+
+You should start by thinking what defines a good restart policy, and how to make a good restart policy.
+
 ### Task
 Design a restart policy (conceptual, not code) to maximize solver performance (solved instances, PAR-2). Your policy must:
 - Define a restart trigger/score and when a restart fires.
 - Provide quantitative rules and tie-breakers.
-- Run in O(1) or O(log n) per conflict/decision.
+- Run in O(1) or O(log n) per conflict.
 - Use only the signals listed below.
 - Include a brief rationale for expected gains.
 
 ### Available Internal Signals
-- stable (bool) — source: solver->stable
-- level (int) — source: solver->level
-- stats.conflicts (uint64) — source: solver->statistics.conflicts
-- stats.decisions (uint64) — source: solver->statistics.decisions
-- restart_conflict_limit (uint64) — source: solver->limits.restart.conflicts
-- fast_glue_ewma (double) — source: solver->averages[solver->stable].fast_glue.value
-- slow_glue_ewma (double) — source: solver->averages[solver->stable].slow_glue.value
-- decision_rate_ewma (double) — source: solver->averages[solver->stable].decision_rate.value
+- is stable stage — source: solver->stable
+- level — source: solver->level
+- number of conflicts — source: solver->statistics.conflicts
+- number of decisions — source: solver->statistics.decisions
+- limit of conflicts — source: solver->limits.restart.conflicts
+- fast averge of glue — source: solver->averages[solver->stable].fast_glue.value
+- slow averge of glue — source: solver->averages[solver->stable].slow_glue.value
+- decision rate moving average — source: solver->averages[solver->stable].decision_rate.value
 
 ### Output Format (JSON only)
 1. Algorithm Name – concise title
-2. Scoring Function Definition – exact mathematical/logical trigger
-3. Selection Procedure – numbered steps to decide restarts
-4. Tie-breaking Rules
-5. Reason – argue why this is a good restart policy
-
-### Parseability Requirements
-- Output a single top-level JSON object, UTF-8 encoded.
-- No markdown, no code fences, no comments, no extra text.
-- Use exactly these five keys with exact spelling:
-  - "Algorithm Name" (string)
-  - "Scoring Function Definition" (string)
-  - "Selection Procedure" (array of non-empty strings)
-  - "Tie-breaking Rules" (array of non-empty strings)
-  - "Reason" (string)
-- No trailing commas; no NaN/Infinity; plain numbers/strings only.
-- If a list would be empty, output an empty JSON array [].
-
-### Response Length Limits
-- Total JSON string: ≤ 2000 characters.
-- "Algorithm Name": ≤ 80 characters.
-- "Scoring Function Definition": ≤ 800 characters.
-- "Selection Procedure": ≤ 6 items; each item ≤ 180 characters.
-- "Tie-breaking Rules": ≤ 5 items; each item ≤ 140 characters.
-- Prefer brevity; do not exceed any limits.
+2. Algorithm
+3. Reason – argue why this is a good restart policy, keet this short
 
 ### Constraints
-- No code/pseudocode.
-- Modify only the restart policy.
 - Use only the listed signals.
 - Keep explanations formal, concise, algorithmic.
 
