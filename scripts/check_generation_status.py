@@ -36,12 +36,18 @@ def get_all_generation_tags():
     rows = cur.fetchall()
     return [row[0] for row in rows if row[0]]
 
-def analyze_generation_tag(generation_tag):
+def analyze_generation_tag(generation_tag, verbose=False):
     """Analyze algorithms for a specific generation tag."""
+    if verbose:
+        print(f"  Fetching algorithm IDs for tag '{generation_tag}'...", flush=True)
+
     algorithm_ids = get_ids_from_router_table(CHATGPT_DATA_GENERATION_TABLE, generation_tag)
 
     if not algorithm_ids:
         return None
+
+    if verbose:
+        print(f"  Found {len(algorithm_ids)} algorithms, analyzing...", flush=True)
 
     status_counts = defaultdict(int)
     code_status_counts = defaultdict(int)
@@ -51,30 +57,37 @@ def analyze_generation_tag(generation_tag):
     build_failed_codes = 0
     total_codes = 0
 
-    for algo_id in algorithm_ids:
-        algo = get_algorithm_result(algo_id)
-        if not algo:
+    for i, algo_id in enumerate(algorithm_ids):
+        if verbose and i % 10 == 0:
+            print(f"    Processing algorithm {i+1}/{len(algorithm_ids)}...", flush=True)
+
+        try:
+            algo = get_algorithm_result(algo_id)
+            if not algo:
+                continue
+
+            status_counts[algo.status] += 1
+
+            # Count code statuses
+            code_ids = algo.code_id_list or []
+            for code_id in code_ids:
+                total_codes += 1
+                code = get_code_result(code_id)
+                if code:
+                    code_status_counts[code.status] += 1
+                    if code.status == CodeStatus.BuildFailed:
+                        build_failed_codes += 1
+
+            # Categorize algorithms by readiness
+            if algo.status == AlgorithmStatus.Generated or algo.status == AlgorithmStatus.CodeGenerated:
+                ready_for_eval.append(algo_id)
+            elif algo.status == AlgorithmStatus.Evaluating:
+                evaluating.append(algo_id)
+            elif algo.status == AlgorithmStatus.Evaluated:
+                evaluated.append(algo_id)
+        except Exception as e:
+            logger.warning(f"Error processing algorithm {algo_id}: {e}")
             continue
-
-        status_counts[algo.status] += 1
-
-        # Count code statuses
-        code_ids = algo.code_id_list or []
-        for code_id in code_ids:
-            total_codes += 1
-            code = get_code_result(code_id)
-            if code:
-                code_status_counts[code.status] += 1
-                if code.status == CodeStatus.BuildFailed:
-                    build_failed_codes += 1
-
-        # Categorize algorithms by readiness
-        if algo.status == AlgorithmStatus.Generated or algo.status == AlgorithmStatus.CodeGenerated:
-            ready_for_eval.append(algo_id)
-        elif algo.status == AlgorithmStatus.Evaluating:
-            evaluating.append(algo_id)
-        elif algo.status == AlgorithmStatus.Evaluated:
-            evaluated.append(algo_id)
 
     return {
         'tag': generation_tag,
@@ -122,20 +135,24 @@ def main():
     parser.add_argument("--tag", type=str, help="Specific generation tag to check")
     parser.add_argument("--all", action="store_true", help="Show all generation tags")
     parser.add_argument("--list-ready", action="store_true", help="List algorithm IDs ready for evaluation")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show progress during analysis")
     args = parser.parse_args()
 
     try:
         if args.all:
             # Show all tags
+            print("Fetching generation tags from database...", flush=True)
             tags = get_all_generation_tags()
             print(f"\nFound {len(tags)} generation tag(s) in database:")
             for tag in tags:
-                tag_info = analyze_generation_tag(tag)
+                tag_info = analyze_generation_tag(tag, verbose=args.verbose)
                 if tag_info:
                     print_summary(tag_info)
         elif args.tag:
             # Show specific tag
-            tag_info = analyze_generation_tag(args.tag)
+            if args.verbose:
+                print(f"Analyzing tag '{args.tag}'...", flush=True)
+            tag_info = analyze_generation_tag(args.tag, verbose=args.verbose)
             if tag_info:
                 print_summary(tag_info)
                 if args.list_ready and tag_info['ready_for_eval']:
@@ -148,14 +165,28 @@ def main():
                 print(f"No data found for generation tag: {args.tag}")
         else:
             # Default: show all tags with summary
+            print("Fetching generation tags from database...", flush=True)
             tags = get_all_generation_tags()
             print(f"\n{'='*80}")
             print(f"CHATGPT_DATA_GENERATION_TABLE Status Summary")
             print(f"{'='*80}")
             print(f"\nTotal generation tags: {len(tags)}")
 
+            if not tags:
+                print("\nNo generation tags found in database.")
+                print("\nMake sure:")
+                print("  1. DB_PASS environment variable is set")
+                print("  2. Database is accessible")
+                print("  3. You have run chatgpt_data_generation.py to generate data")
+                return
+
+            if args.verbose:
+                print("\nAnalyzing tags (this may take a while)...", flush=True)
+
             for tag in tags:
-                tag_info = analyze_generation_tag(tag)
+                if args.verbose:
+                    print(f"\nProcessing tag: {tag}", flush=True)
+                tag_info = analyze_generation_tag(tag, verbose=args.verbose)
                 if tag_info:
                     print(f"\n{tag}: {tag_info['total_algorithms']} algorithms, "
                           f"{len(tag_info['ready_for_eval'])} ready, "
@@ -164,7 +195,19 @@ def main():
 
             print(f"\nUse --tag <TAG> for detailed breakdown")
             print(f"Use --all to see all tags in detail")
+            print(f"Use --verbose/-v to see progress during analysis")
 
+    except KeyError as e:
+        if "DB_PASS" in str(e):
+            print("\nError: DB_PASS environment variable not set!")
+            print("Run: export DB_PASS=\"Damn123,\"")
+            print("Or: source export_aws_db_pw.sh")
+            sys.exit(1)
+        else:
+            logger.error(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
     except Exception as e:
         logger.error(f"Error: {e}")
         import traceback
