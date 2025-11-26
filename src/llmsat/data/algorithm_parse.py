@@ -92,14 +92,11 @@ def parse_kissat_restart_policy_json(text: str) -> dict[str]:
 
     return spec_obj
 
-def main():
-    # read file from argument
-    parser = argparse.ArgumentParser(description="Parse Kissat restart policy JSON")
-    parser.add_argument("--input", type=str, default="data/algorithm_generation_outputs/kissat_algorithm_outputs.jsonl", help="Input file path")
-    parser.add_argument("--output", type=str, default="data/algorithm_response.jsonl", help="Output file path")
-    parser.add_argument("--print_algorithms", type=int, default=0, help="Print the first n algorithms")
-    args = parser.parse_args()
-    with open(args.input, "r") as f:
+def generate_and_parse_algorithms(input_file: str, output_file: str) -> None:
+    pass
+
+def parse_algorithms(input_file: str, output_file: str) -> None:
+    with open(input_file, "r") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -120,6 +117,21 @@ def main():
             update_algorithm_result(algorithm_result)
             retrieved_algorithm_result = get_algorithm_result(algorithm_result.id)
             print(retrieved_algorithm_result.algorithm)
+            with open(output_file, "a") as f:
+                f.write(retrieved_algorithm_result.algorithm + "\n")
+
+def main():
+    # read file from argument
+    parser = argparse.ArgumentParser(description="Parse Kissat restart policy JSON")
+    parser.add_argument("--input", type=str, default="data/algorithm_generation_outputs/kissat_algorithm_outputs.jsonl", help="Input file path")
+    parser.add_argument("--output", type=str, default="data/algorithm_response.jsonl", help="Output file path")
+    parser.add_argument("--print_algorithms", type=int, default=0, help="Print the first n algorithms")
+    parser.add_argument("--generate_and_parse", type=bool, default=False, help="Generate and parse the algorithms")
+    args = parser.parse_args()
+    if args.generate_and_parse:
+        generate_and_parse_algorithms(args.input, args.output)
+    else:
+        parse_algorithms(args.input, args.output)
 
 
 if __name__ == "__main__":
