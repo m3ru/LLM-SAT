@@ -229,9 +229,9 @@ def ToCodeResult(result: tuple) -> CodeResult:
             algorithm_id=result[2],
             code=result[1],
             status=result[3],
+            par2=_to_float(result[7]),
             last_updated=result[4],
-            build_success=_to_bool(result[6]),
-            par2=_to_float(result[7]))
+            build_success=_to_bool(result[6]))
 
 def get_all_algorithm_results() -> List[AlgorithmResult]:
     conn = connect_to_db()
@@ -263,6 +263,7 @@ def test_utils():
         algorithm_id="1",
         code="return false;",
         status=CodeStatus.Generated,
+        par2=None,
         last_updated=datetime.now(),
         build_success=None
     )
@@ -344,12 +345,12 @@ def _text_to_code_id_list(value: Any) -> List[str]:
 def _row_to_code_result(row: Mapping[str, Any]) -> CodeResult:
     return CodeResult(
         id=row.get("id"),
-        code=row.get("code"),
         algorithm_id=row.get("algorithm_id"),
+        code=row.get("code"),
         status=row.get("status"),
+        par2=_to_float(row.get("par2")),
         last_updated=row.get("last_updated"),
         build_success=_to_bool(row.get("build_success")),
-        par2=_to_float(row.get("par2")),
     )
     
 def _row_to_algorithm_result(row: Mapping[str, Any]) -> AlgorithmResult:

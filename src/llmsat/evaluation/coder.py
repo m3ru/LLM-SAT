@@ -112,6 +112,7 @@ class Coder:
                     algorithm_id=algorithm.id,
                     code=code,
                     status=CodeStatus.Generated,
+                    par2=None,
                     last_updated=datetime.now(),
                     build_success=None
                 )

@@ -26,6 +26,7 @@ def main():
         algorithm_id="1",
         code="return false;",
         status=CodeStatus.Generated,
+        par2=None,
         last_updated=datetime.now(),
         build_success=None
     )

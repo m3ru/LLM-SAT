@@ -269,6 +269,7 @@ def fake_generate_data(designer_prompt_path: str, code_prompt_template_path: str
                         algorithm_id=algorithm_id,
                         code=code_str,
                         status=CodeStatus.Generated,
+                        par2=None,
                         last_updated=datetime.now(),
                         build_success=NOT_INITIALIZED,
                     )
@@ -377,6 +378,7 @@ def generate_data(designer_prompt_path: str, code_prompt_template_path: str, gen
                         algorithm_id=mapped_algorithm_id,
                         code=code_str,
                         status=CodeStatus.Generated,
+                        par2=None,
                         last_updated=datetime.now(),
                         build_success=NOT_INITIALIZED,
                     )
