@@ -192,23 +192,17 @@ class EvaluationPipeline:
 
     def filter_code(self, code: str) -> str:
         def normalize_escaped_whitespace(text: str) -> str:
-            # Heuristic: if we see many literal '\n' and very few real newlines, unescape once
-            literal_newlines = text.count("\\n")
-            real_newlines = text.count("\n")
-            if literal_newlines >= 3 and real_newlines < 3:
-                try:
-                    # Attempt a single unicode escape decode
-                    decoded = bytes(text, "utf-8").decode("unicode_escape")
-                    return decoded
-                except Exception:
-                    # Fallback to simple replacements
-                    text = text.replace("\\r\\n", "\n")
-                    text = text.replace("\\n", "\n")
-                    text = text.replace("\\t", "\t")
-                    text = text.replace('\\"', '"')
-                    return text
-            # Also normalize Windows line endings if present
-            return text.replace("\r\n", "\n")
+            # Always unescape common escape sequences
+            # This handles both JSON-escaped (\\n) and Python string literals (\n)
+            text = text.replace('\\n', '\n')
+            text = text.replace('\\t', '\t')
+            text = text.replace('\\r', '\r')
+            text = text.replace('\\"', '"')
+            text = text.replace("\\'", "'")
+            text = text.replace('\\\\', '\\')
+            # Also normalize Windows line endings
+            text = text.replace("\r\n", "\n")
+            return text
 
         def extract_function(text: str, func_name: str) -> Optional[str]:
             # Try to find a reasonable C function header for 'bool kissat_restarting'
