@@ -133,13 +133,13 @@ def update_code_result(code_result: CodeResult):
     code_result.last_updated = datetime.now()
     if existing_code_result is None: # add the code result
         cur.execute(
-            "INSERT INTO code_results (id, code, algorithm, status, last_updated, build_success) VALUES (%s, %s, %s, %s, %s, %s);",
-            (code_result.id, code_result.code, code_result.algorithm_id, code_result.status, code_result.last_updated, build_success_text),
+            "INSERT INTO code_results (id, code, algorithm, status, last_updated, build_success, par2) VALUES (%s, %s, %s, %s, %s, %s, %s);",
+            (code_result.id, code_result.code, code_result.algorithm_id, code_result.status, code_result.last_updated, build_success_text, code_result.par2),
         )
     else: # update the code result
         cur.execute(
-            "UPDATE code_results SET code = %s, algorithm = %s, status = %s, last_updated = %s, build_success = %s WHERE id = %s;",
-            (code_result.code, code_result.algorithm_id, code_result.status, code_result.last_updated, build_success_text, code_result.id),
+            "UPDATE code_results SET code = %s, algorithm = %s, status = %s, last_updated = %s, build_success = %s, par2 = %s WHERE id = %s;",
+            (code_result.code, code_result.algorithm_id, code_result.status, code_result.last_updated, build_success_text, code_result.par2, code_result.id),
         )
     conn.commit()
     logger.info(f"Updated code result {code_result.id}")
