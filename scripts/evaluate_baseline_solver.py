@@ -33,15 +33,18 @@ def parse_solving_time(log_file: str) -> Optional[float]:
     with open(log_file, 'r') as f:
         content = f.read()
 
-    # Look for "process-time" line (same as evaluation.py uses)
+    # Look for "process-time" line
+    # Format can be:
+    #   "c process-time:                         2m 58s             177.71 seconds"
+    #   "c process-time:                                              0.00 seconds"
     for line in content.split('\n'):
         if 'process-time' in line:
             try:
-                # Format is usually: "c process-time: X.XX seconds"
                 parts = line.split()
+                # Look for "seconds" and get the number before it
                 for i, part in enumerate(parts):
-                    if part == 'process-time:' and i + 1 < len(parts):
-                        time_str = parts[i + 1]
+                    if part == 'seconds' and i > 0:
+                        time_str = parts[i - 1]
                         return float(time_str)
             except (ValueError, IndexError) as e:
                 logger.warning(f"Failed to parse process-time from line: {line} ({e})")
@@ -275,3 +278,4 @@ Examples:
 
 if __name__ == "__main__":
     main()
+
