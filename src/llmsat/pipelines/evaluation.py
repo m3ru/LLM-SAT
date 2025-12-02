@@ -35,7 +35,7 @@ from llmsat.llmsat import (
     RECOVERED_ALGORITHM,
 )
 from llmsat.utils.paths import get_solver_dir, get_solver_solving_times_path, get_algorithm_dir,get_solver_result_dir
-from llmsat.utils.utils import wrap_command_to_slurm
+from llmsat.utils.utils import wrap_command_to_slurm, wrap_command_to_slurm_array
 
 logger = get_logger(__name__)
 

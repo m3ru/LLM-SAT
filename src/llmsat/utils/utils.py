@@ -68,6 +68,48 @@ def atomic_append(file_path: str, content: str) -> None:
             # Release lock
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
+def wrap_command_to_slurm_array(
+    script_path: str,
+    array_range: str,
+    mem: str = "8G",
+    time: str = "00:30:00",
+    nodes: int = 1,
+    ntasks: int = 1,
+    cpus_per_task: int = 1,
+    job_name: str = None,
+    output_file: str = None,
+    error_file: str = None,
+    max_concurrent: int = None,
+) -> str:
+    """
+    Create an sbatch command for a job array.
+    
+    Args:
+        script_path: Path to the bash script to run for each array task
+        array_range: SLURM array range (e.g., "0-199" or "0-199%50" for max 50 concurrent)
+        max_concurrent: Maximum number of concurrent array tasks (optional)
+    """
+    job_name_parameter = f"--job-name={job_name}" if job_name else ""
+    output_parameter = f"--output={output_file}" if output_file else ""
+    error_parameter = f"--error={error_file}" if error_file else ""
+    
+    # Add max concurrent limit to array spec if provided
+    array_spec = array_range
+    if max_concurrent:
+        array_spec = f"{array_range}%{max_concurrent}"
+    
+    return f"sbatch \
+        {job_name_parameter} \
+        {output_parameter} \
+        {error_parameter} \
+        --mem={mem} \
+        --time={time} \
+        --nodes={nodes} \
+        --ntasks={ntasks} \
+        --cpus-per-task={cpus_per_task} \
+        --array={array_spec} \
+        {script_path}"
+
 def wrap_command_to_slurm(
     command: str,
     mem: str="8G",
