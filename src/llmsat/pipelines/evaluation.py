@@ -77,7 +77,7 @@ def _compute_average(values: List[float]) -> Optional[float]:
 def _get_activation_cmd() -> str:
     # Use user-requested env activation instead of conda
     logger.debug("Using activation command: source ../../general/bin/activate")
-    return "source ../../general/bin/activate"
+    return "source ~/general/bin/activate"
 
 @dataclass
 class EvaluationPipeline:
@@ -680,7 +680,7 @@ def main():
             generation_tag = args.generation_tag
         else:
             # Fall back to hardcoded default for backward compatibility
-            generation_tag = "chatgpt_data_generation_gpt5_2"
+            generation_tag = "kissatmab_experiment3"
             logger.warning(f"No --generation_tag specified, using default: {generation_tag}")
 
         logger.info(f"Evaluating algorithms from generation tag: {generation_tag}")

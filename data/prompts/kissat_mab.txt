@@ -1,51 +1,80 @@
-You are an AI researcher specializing in CDCL restart policies with Multi-Armed Bandit (MAB) strategies. Propose a new MAB-based restart policy algorithm for the Kissat-MAB SAT solver.
-
-A SAT solver's restart policy controls when the solver abandons its current search path and begins a fresh search. In Kissat-MAB, the restart strategy uses Multi-Armed Bandit techniques to adaptively select between different restart policies based on their performance. The MAB framework treats each restart strategy as an "arm" and learns which strategies work best for the current instance.
-
-You should start by thinking what defines a good MAB-based restart policy, how the bandit framework can improve upon static policies, and how to balance exploration vs exploitation.
+You are designing a restart trigger policy for the Kissat-MAB SAT solver to optimize performance on SAT Competition 2025 benchmarks (400 instances, PAR-2 scoring).
 
 ### Task
-Design a MAB-aware restart policy (conceptual, not code) to maximize solver performance (solved instances, PAR-2). Your policy must:
-- Define restart triggers/scores that work with the MAB framework
-- Specify how the policy interacts with MAB arm selection
-- Provide quantitative rules and tie-breakers
-- Run in O(1) or O(log n) per conflict
+Design a restart trigger algorithm (conceptual, not code) that decides WHEN the solver should restart. Your policy will replace the `kissat_restarting()` function and must:
+- Return a boolean decision (restart now: true/false)
+- Run in O(1) amortized time per call
 - Use only the signals listed below
-- Include a brief rationale for expected gains in MAB context
+- Improve PAR-2 score over baseline
 
-### Available Internal Signals
+### Search Mode Context
 
-**Base Kissat Signals:**
-- is stable stage — source: solver->stable
-- level — source: solver->level
-- number of conflicts — source: solver->statistics.conflicts
-- number of decisions — source: solver->statistics.decisions
-- limit of conflicts — source: solver->limits.restart.conflicts
-- fast average of glue — source: solver->averages[solver->stable].fast_glue.value
-- slow average of glue — source: solver->averages[solver->stable].slow_glue.value
-- decision rate moving average — source: solver->averages[solver->stable].decision_rate.value
+**Focused Mode** (solver->stable = false):
+- Uses VSIDS or CHB heuristic (determined by MAB in stable mode)
+- Baseline trigger: restart when fast_glue exceeds slow_glue by margin%
+- Restart limit updated after each restart: conflicts + restartint + log(restarts)
 
-**MAB-Specific Signals:**
-- MAB enabled flag — source: solver->mab
-- current heuristic — source: solver->heuristic
-- MAB reward for heuristic 0 — source: solver->mab_reward[0]
-- MAB reward for heuristic 1 — source: solver->mab_reward[1]
-- MAB selection count for heuristic 0 — source: solver->mab_select[0]
-- MAB selection count for heuristic 1 — source: solver->mab_select[1]
-- number of heuristics — source: solver->mab_heuristics
-- MAB decisions counter — source: solver->mab_decisions
-- MAB conflicts counter — source: solver->mab_conflicts
-- total chosen variables — source: solver->mab_chosen_tot
+**Stable Mode** (solver->stable = true):
+- Uses reluctant doubling (Luby sequence) for restart intervals
+- MAB selects between heuristics (VSIDS=0, CHB=1) after each restart
+- Baseline trigger: reluctant.trigger flag via Luby sequence
+
+**Key Insight**: MAB heuristic selection happens OUTSIDE this function (in restart_mab). Your trigger can observe MAB performance signals to make smarter restart timing decisions.
+
+### Available Signals
+
+**Required Guards** (must check these):
+- `solver->unassigned` (unsigned) — unassigned variables remaining; must be > 0
+- `solver->level` (unsigned) — current decision level; must be > 0
+- `GET_OPTION(restart)` (int) — restarts enabled flag; must be true
+
+**Core Statistics** (use macros):
+- `CONFLICTS` — total conflicts (uint64_t) [macro for solver->statistics.conflicts]
+- `DECISIONS` — total decisions (uint64_t) [macro for solver->statistics.decisions]
+- `solver->statistics.restarts` (uint64_t) — total restart count
+
+**Restart Limits**:
+- `solver->limits.restart.conflicts` (uint64_t) — next scheduled restart threshold
+
+**Quality Metrics** (use macros):
+- `AVERAGE(fast_glue)` (double) — recent learned clause glue EMA [macro for solver->averages[solver->stable].fast_glue.value]
+- `AVERAGE(slow_glue)` (double) — baseline learned clause glue EMA
+- `AVERAGE(decision_rate)` (double) — decisions per conflict EMA
+
+**Configuration Options**:
+- `GET_OPTION(restartmargin)` (int) — glue margin percentage (default: 10, range: 0-25)
+- `GET_OPTION(restartint)` (int) — base restart interval (default: varies by version)
+
+**MAB Performance Signals** (stable mode only):
+- `solver->mab` (bool) — MAB enabled flag
+- `solver->heuristic` (unsigned) — active heuristic: 0=VSIDS, 1=CHB
+- `solver->mab_reward[0]` (double) — cumulative reward for VSIDS
+- `solver->mab_reward[1]` (double) — cumulative reward for CHB
+  * Reward formula: log₂(decisions) / log₂(conflicts) since last restart
+  * Higher reward = more solving progress per conflict
+- `solver->mab_select[0]` (unsigned) — times VSIDS selected
+- `solver->mab_select[1]` (unsigned) — times CHB selected
+- `solver->mab_decisions` (double) — decisions made since last restart
+- `solver->mab_conflicts` (unsigned) — conflicts since last restart
+- `solver->mab_chosen_tot` (unsigned) — total variable selections since last restart
+- `solver->mabc` (double) — UCB exploration constant C
+
+**Helper Functions Available**:
+- `kissat_reluctant_triggered(&solver->reluctant)` → bool (stable mode Luby trigger)
 
 ### Output Format (JSON only)
-1. Algorithm Name – concise title
-2. Algorithm – detailed description of the MAB-aware restart policy
-3. Reason – argue why this is a good restart policy for MAB framework, keep this short
+{
+  "name": "Brief algorithm name (≤6 words)",
+  "algorithm": "Detailed restart trigger logic. Specify conditions for returning true (restart) vs false (continue). Handle both stable and focused modes. Include quantitative thresholds and tie-breakers.",
+  "reason": "Why this improves restart timing using MAB signals (2-3 sentences max). Focus on adaptive benefits for diverse SAT Competition instances."
+}
 
 ### Constraints
-- Use only the listed signals
-- Consider MAB exploration/exploitation trade-offs
-- Keep explanations formal, concise, algorithmic
+- Do NOT modify MAB state (mab_reward, mab_select, heuristic) — only observe
+- Do NOT call kissat_restart() or restart_mab() — this function only decides the trigger
+- Must respect baseline behavior unless strong justification: stable mode reluctant doubling is well-tested
+- Avoid magic numbers; use GET_OPTION() for configurable parameters
 
-### Final Instruction
-Act as a SAT-solver algorithm designer. Produce a single, self-contained MAB-aware restart policy description implementable inside Kissat-MAB's restart logic.
+### Baseline Reference
+**Current focused mode**: `return (CONFLICTS >= limits.restart.conflicts) && ((1.0 + margin/100.0) * slow_glue <= fast_glue)`
+**Current stable mode**: `return (CONFLICTS >= limits.restart.conflicts) && kissat_reluctant_triggered(&solver->reluctant)`

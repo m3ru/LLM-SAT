@@ -417,11 +417,11 @@ def print_generation_result(generation_tag: str):
 
 def main():
     generate_data(
-        generation_tag="chatgpt_data_generation_gpt4o_2",
-        designer_prompt_path="./data/prompts/kissat.txt",
-        code_prompt_template_path="./data/prompts/kissat_code.txt",
+        generation_tag="kissatmab",
+        designer_prompt_path="./data/prompts/kissat_mab.txt",
+        code_prompt_template_path="./data/prompts/kissat_mab_code.txt",
         n_algorithms=5, n_codes=10,
-        model="gpt-4o",
+        model="gpt-5.1-mini",
     )
 
 def test():
