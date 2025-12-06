@@ -417,11 +417,11 @@ def print_generation_result(generation_tag: str):
 
 def main():
     generate_data(
-        generation_tag="kissatmab",
+        generation_tag="dpo_testing",
         designer_prompt_path="./data/prompts/kissat_mab.txt",
         code_prompt_template_path="./data/prompts/kissat_mab_code.txt",
-        n_algorithms=5, n_codes=10,
-        model="gpt-5.1-mini",
+        n_algorithms=10, n_codes=1,
+        model="gpt-4o",
     )
 
 def test():
