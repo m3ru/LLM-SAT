@@ -29,9 +29,15 @@ from llmsat.utils.utils import wrap_command_to_slurm, wrap_command_to_slurm_arra
 setup_logging()
 logger = get_logger(__name__)
 
-# Match LLM evaluation settings
-TIMEOUT_SECONDS = 5000   # 30 minutes
-PENALTY_SECONDS = 10000  # Penalty for timeout/error (matches LLM evaluation)
+# Default settings (can be overridden via command line)
+# For short evaluation (matching LLM eval): --timeout 600 --penalty 1200
+# For standard SAT competition: --timeout 5000 --penalty 10000
+DEFAULT_TIMEOUT_SECONDS = 600  # 10 minutes (matches LLM sequential eval)
+DEFAULT_PENALTY_SECONDS = 1200  # 20 minutes penalty (matches LLM sequential eval)
+
+# Global variables that will be set from command line args
+TIMEOUT_SECONDS = DEFAULT_TIMEOUT_SECONDS
+PENALTY_SECONDS = DEFAULT_PENALTY_SECONDS
 
 
 def parse_solving_time(log_file: str) -> Optional[float]:
@@ -63,13 +69,38 @@ def parse_solving_time(log_file: str) -> Optional[float]:
     return None
 
 
-def submit_evaluation_jobs(solver_binary: str, benchmark_path: str, result_dir: str, dry_run: bool = False, max_jobs: int = 200) -> List[int]:
+def submit_evaluation_jobs(solver_binary: str, benchmark_path: str, result_dir: str, dry_run: bool = False, max_jobs: int = 200, timeout: int = None, penalty: int = None, force: bool = False, cnf_file: str = None) -> List[int]:
     """
     Submit solver evaluation using a SLURM job array (counts as 1 job toward QOS limit).
     
     Creates a CNF file list and a wrapper script, then submits a single job array
     that runs the solver on all benchmarks. Matches the approach used for LLM evaluation.
+    
+    Args:
+        solver_binary: Path to the solver binary
+        benchmark_path: Path to benchmark CNF files
+        result_dir: Directory to store results
+        dry_run: If True, don't actually submit jobs
+        max_jobs: Maximum number of jobs to submit
+        timeout: Timeout in seconds per instance (default: TIMEOUT_SECONDS)
+        penalty: Penalty in seconds for timeout/error (default: PENALTY_SECONDS)
+        force: If True, re-evaluate all benchmarks (clear existing results)
+        cnf_file: Path to file containing CNF filenames to evaluate (one per line)
     """
+    if timeout is None:
+        timeout = TIMEOUT_SECONDS
+    if penalty is None:
+        penalty = PENALTY_SECONDS
+    
+    # Clear existing results if force is True
+    if force and os.path.isdir(result_dir):
+        import glob
+        existing_logs = glob.glob(f"{result_dir}/*.solving.log")
+        if existing_logs:
+            logger.info(f"Force mode: removing {len(existing_logs)} existing .solving.log files")
+            for log_file in existing_logs:
+                os.remove(log_file)
+        
     os.makedirs(result_dir, exist_ok=True)
 
     if not os.path.exists(solver_binary):
@@ -81,15 +112,37 @@ def submit_evaluation_jobs(solver_binary: str, benchmark_path: str, result_dir: 
         logger.error(f"Benchmark directory not found: {benchmark_path}")
         return []
 
-    # Collect CNF files to evaluate (skip already completed ones)
+    # Collect CNF files to evaluate
     cnf_files = []
     jobs_skipped = 0
-    for benchmark_file in sorted(os.listdir(benchmark_path)):
-        if benchmark_file.endswith(".cnf"):
-            if os.path.exists(f"{result_dir}/{benchmark_file}.solving.log"):
+    
+    if cnf_file:
+        # Load CNF filenames from file
+        if not os.path.exists(cnf_file):
+            logger.error(f"CNF file list not found: {cnf_file}")
+            return []
+        with open(cnf_file, 'r') as f:
+            all_cnfs = [line.strip() for line in f if line.strip()]
+        logger.info(f"Loaded {len(all_cnfs)} CNF filenames from {cnf_file}")
+        
+        # Filter to those that exist and haven't been evaluated
+        for cnf in all_cnfs:
+            cnf_path = os.path.join(benchmark_path, cnf)
+            if not os.path.exists(cnf_path):
+                logger.warning(f"CNF file not found: {cnf_path}")
+                continue
+            if os.path.exists(f"{result_dir}/{cnf}.solving.log"):
                 jobs_skipped += 1
                 continue
-            cnf_files.append(benchmark_file)
+            cnf_files.append(cnf)
+    else:
+        # Scan benchmark directory
+        for benchmark_file in sorted(os.listdir(benchmark_path)):
+            if benchmark_file.endswith(".cnf"):
+                if os.path.exists(f"{result_dir}/{benchmark_file}.solving.log"):
+                    jobs_skipped += 1
+                    continue
+                cnf_files.append(benchmark_file)
 
     if not cnf_files:
         logger.info(f"All {jobs_skipped} benchmarks already evaluated, nothing to submit")
@@ -127,6 +180,7 @@ CNF_LIST="{abs_cnf_list}"
 SOLVER="{abs_solver}"
 BENCHMARK_PATH="{abs_benchmark}"
 RESULT_DIR="{abs_result}"
+TIMEOUT={timeout}
 
 # Get the CNF file for this array task (0-indexed)
 CNF_FILE=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$CNF_LIST")
@@ -137,8 +191,12 @@ if [ -z "$CNF_FILE" ]; then
 fi
 
 echo "Running baseline solver on $CNF_FILE (array task $SLURM_ARRAY_TASK_ID)"
-"$SOLVER" "$BENCHMARK_PATH/$CNF_FILE" > "$RESULT_DIR/$CNF_FILE.solving.log" 2>&1
+echo "Timeout: ${{TIMEOUT}}s"
+timeout ${{TIMEOUT}}s "$SOLVER" "$BENCHMARK_PATH/$CNF_FILE" > "$RESULT_DIR/$CNF_FILE.solving.log" 2>&1
 EXIT_CODE=$?
+if [ $EXIT_CODE -eq 124 ]; then
+    echo "TIMEOUT after ${{TIMEOUT}}s" >> "$RESULT_DIR/$CNF_FILE.solving.log"
+fi
 echo "Solver finished with exit code $EXIT_CODE"
 exit $EXIT_CODE
 """
@@ -150,20 +208,26 @@ exit $EXIT_CODE
     if dry_run:
         print(f"\nDry run complete.")
         print(f"Would submit job array with {len(cnf_files)} tasks")
+        print(f"Timeout: {timeout}s, Penalty: {penalty}s")
         print(f"Script: {script_path}")
         return []
 
+    # Calculate SLURM wall time (timeout + 2 minute buffer)
+    wall_time_seconds = timeout + 120
+    slurm_time = f"{wall_time_seconds // 3600:02d}:{(wall_time_seconds % 3600) // 60:02d}:{wall_time_seconds % 60:02d}"
+    
     # Submit job array (0-indexed, so 0 to N-1)
     array_range = f"0-{len(cnf_files) - 1}"
     slurm_cmd = wrap_command_to_slurm_array(
         script_path=script_path,
         array_range=array_range,
         mem="8G",
-        time="01:23:20",  # 5000 seconds timeout (matches LLM evaluation)
+        time=slurm_time,
         job_name="baseline_array",
         output_file=f"{abs_result}/slurm_array_%a.log",
         max_concurrent=100,  # Limit concurrent tasks
     )
+    logger.info(f"Settings: timeout={timeout}s, penalty={penalty}s, slurm_time={slurm_time}")
     logger.info(f"Submitting job array with command: {slurm_cmd}")
 
     try:
@@ -186,13 +250,18 @@ exit $EXIT_CODE
         return []
 
 
-def collect_results(result_dir: str, output_file: str = None):
+def collect_results(result_dir: str, output_file: str = None, penalty: int = None):
     """
     Collect results from all .solving.log files and compute PAR2 score.
     
-    Uses the same penalty (5000s) as LLM evaluation for timeouts/errors
-    to ensure scores are comparable.
+    Args:
+        result_dir: Directory containing .solving.log files
+        output_file: Output JSON file path (default: <result_dir>/baseline_solving_times.json)
+        penalty: Penalty in seconds for timeout/error (default: PENALTY_SECONDS)
     """
+    if penalty is None:
+        penalty = PENALTY_SECONDS
+        
     if not os.path.isdir(result_dir):
         logger.error(f"Result directory not found: {result_dir}")
         return
@@ -207,6 +276,7 @@ def collect_results(result_dir: str, output_file: str = None):
         return
 
     logger.info(f"Collecting results from {len(log_files)} log files...")
+    logger.info(f"Using penalty: {penalty}s for timeouts/errors")
 
     for log_file in log_files:
         instance_name = log_file.replace('.solving.log', '')
@@ -216,11 +286,11 @@ def collect_results(result_dir: str, output_file: str = None):
 
         if solving_time is not None:
             solving_times[instance_name] = solving_time
-            if solving_time >= PENALTY_SECONDS:
+            if solving_time >= penalty:
                 timeouts_or_errors.append(instance_name)
         else:
             # Incomplete/timeout - assign penalty (matches LLM evaluation)
-            solving_times[instance_name] = float(PENALTY_SECONDS)
+            solving_times[instance_name] = float(penalty)
             timeouts_or_errors.append(instance_name)
 
     # Compute PAR2 score
@@ -231,7 +301,7 @@ def collect_results(result_dir: str, output_file: str = None):
         print(f"Baseline Solver Results")
         print(f"{'='*80}")
         print(f"Completed instances: {len(solving_times)}")
-        print(f"Timeouts/Errors: {len(timeouts_or_errors)} (penalty: {PENALTY_SECONDS}s)")
+        print(f"Timeouts/Errors: {len(timeouts_or_errors)} (penalty: {penalty}s)")
         print(f"PAR2 Score: {par2:.2f}")
         print(f"{'='*80}\n")
 
@@ -260,14 +330,23 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Submit evaluation jobs for baseline solver
+  # Submit evaluation jobs on 100-CNF subset (default: 600s timeout, 1200s penalty)
+  python scripts/evaluate_baseline_solver.py --submit --cnf-file data/cnf_subset_100.txt
+  
+  # Submit evaluation on all benchmarks
   python scripts/evaluate_baseline_solver.py --submit
+  
+  # Submit with standard SAT competition settings (5000s/10000s)
+  python scripts/evaluate_baseline_solver.py --submit --timeout 5000 --penalty 10000
 
   # Dry run to see what would be submitted
-  python scripts/evaluate_baseline_solver.py --submit --dry-run
+  python scripts/evaluate_baseline_solver.py --submit --dry-run --cnf-file data/cnf_subset_100.txt
 
-  # Collect results and compute PAR2 score
+  # Collect results and compute PAR2 score (uses default penalty)
   python scripts/evaluate_baseline_solver.py --collect
+  
+  # Collect results with custom penalty
+  python scripts/evaluate_baseline_solver.py --collect --penalty 1200
 
   # Use custom paths
   python scripts/evaluate_baseline_solver.py --submit --solver /path/to/kissat --benchmarks /path/to/cnf/
@@ -283,11 +362,23 @@ Examples:
                        help="Directory to store results (default: data/results/baseline)")
     parser.add_argument("--output", type=str, default=None,
                        help="Output JSON file for solving times (default: <result-dir>/baseline_solving_times.json)")
-    parser.add_argument("--max-jobs", type=int, default=200,
-                       help="Maximum number of jobs to submit in one run (default: 200)")
+    parser.add_argument("--max-jobs", type=int, default=400,
+                       help="Maximum number of jobs to submit in one run (default: 400)")
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS,
+                       help=f"Timeout in seconds per CNF instance (default: {DEFAULT_TIMEOUT_SECONDS})")
+    parser.add_argument("--penalty", type=int, default=DEFAULT_PENALTY_SECONDS,
+                       help=f"Penalty for timeout/error in seconds (default: {DEFAULT_PENALTY_SECONDS})")
     parser.add_argument("--dry-run", action="store_true", help="Dry run - show what would be done")
+    parser.add_argument("--force", action="store_true", help="Force re-evaluation of all benchmarks (clears existing results)")
+    parser.add_argument("--cnf-file", type=str, default=None,
+                       help="Path to file containing CNF filenames to evaluate (one per line). If not provided, scans benchmark directory.")
 
     args = parser.parse_args()
+    
+    # Update global settings from command line args
+    global TIMEOUT_SECONDS, PENALTY_SECONDS
+    TIMEOUT_SECONDS = args.timeout
+    PENALTY_SECONDS = args.penalty
 
     # Set solver binary path - use build/kissat which outputs statistics including process-time
     if args.solver is None:
@@ -301,12 +392,17 @@ Examples:
             benchmark_path=args.benchmarks,
             result_dir=args.result_dir,
             dry_run=args.dry_run,
-            max_jobs=args.max_jobs
+            max_jobs=args.max_jobs,
+            timeout=args.timeout,
+            penalty=args.penalty,
+            force=args.force,
+            cnf_file=args.cnf_file
         )
     elif args.collect:
         collect_results(
             result_dir=args.result_dir,
-            output_file=args.output
+            output_file=args.output,
+            penalty=args.penalty
         )
     else:
         parser.print_help()

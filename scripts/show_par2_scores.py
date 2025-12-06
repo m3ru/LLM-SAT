@@ -99,22 +99,48 @@ def show_par2_scores(generation_tag, sort_by_par2=False):
     print(f"Build failures: {len(build_failed)} ({len(build_failed)/total_codes*100:.1f}%)")
     print(f"Evaluated (with PAR2): {len(evaluated_codes)} ({len(evaluated_codes)/total_codes*100:.1f}%)")
 
+    # Try to load baseline PAR2 for comparison
+    baseline_par2 = None
+    baseline_json_path = "data/results/baseline/baseline_solving_times.json"
+    if os.path.exists(baseline_json_path):
+        try:
+            import json
+            with open(baseline_json_path, 'r') as f:
+                baseline_times = json.load(f)
+            if baseline_times:
+                baseline_par2 = sum(baseline_times.values()) / len(baseline_times)
+        except Exception as e:
+            logger.warning(f"Could not load baseline PAR2: {e}")
+
     if evaluated_codes:
         par2_values = [r['par2'] for r in evaluated_codes]
         print(f"\nPAR2 Statistics:")
+        if baseline_par2 is not None:
+            print(f"  Baseline:       {baseline_par2:.2f}")
         print(f"  Best (lowest):  {min(par2_values):.2f}")
         print(f"  Worst (highest): {max(par2_values):.2f}")
         print(f"  Average:        {sum(par2_values)/len(par2_values):.2f}")
+        
+        if baseline_par2 is not None:
+            better_than_baseline = len([p for p in par2_values if p < baseline_par2])
+            print(f"\n  Better than baseline: {better_than_baseline}/{len(par2_values)} "
+                  f"({better_than_baseline/len(par2_values)*100:.1f}%)")
 
         if sort_by_par2:
             print(f"\n{'─'*100}")
             print("TOP 10 BEST CODES (by PAR2 score):")
+            if baseline_par2 is not None:
+                print(f"(Baseline PAR2: {baseline_par2:.2f})")
             print(f"{'─'*100}")
 
             sorted_results = sorted(evaluated_codes, key=lambda x: x['par2'])
             for i, r in enumerate(sorted_results[:10], 1):
+                vs_baseline = ""
+                if baseline_par2 is not None:
+                    diff = r['par2'] - baseline_par2
+                    vs_baseline = f" ({diff:+.2f} vs baseline)"
                 print(f"{i:2d}. Algo {r['algo_idx']:3d} Code {r['code_idx']:2d} | "
-                      f"PAR2: {r['par2']:8.2f} | "
+                      f"PAR2: {r['par2']:8.2f}{vs_baseline} | "
                       f"Code ID: {r['code_id'][:16]}...")
 
 
