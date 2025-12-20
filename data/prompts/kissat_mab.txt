@@ -7,23 +7,11 @@ Design a restart trigger algorithm (conceptual, not code) that decides WHEN the 
 - Use only the signals listed below
 - Improve PAR-2 score over baseline
 
-### Search Mode Context
-
-**Focused Mode** (solver->stable = false):
-- Uses VSIDS or CHB heuristic (determined by MAB in stable mode)
-- Baseline trigger: restart when fast_glue exceeds slow_glue by margin%
-- Restart limit updated after each restart: conflicts + restartint + log(restarts)
-
-**Stable Mode** (solver->stable = true):
-- Uses reluctant doubling (Luby sequence) for restart intervals
-- MAB selects between heuristics (VSIDS=0, CHB=1) after each restart
-- Baseline trigger: reluctant.trigger flag via Luby sequence
-
 **Key Insight**: MAB heuristic selection happens OUTSIDE this function (in restart_mab). Your trigger can observe MAB performance signals to make smarter restart timing decisions.
 
 ### Available Signals
 
-**Required Guards** (must check these):
+**Required Guards** (return false if conditions not satisfied):
 - `solver->unassigned` (unsigned) — unassigned variables remaining; must be > 0
 - `solver->level` (unsigned) — current decision level; must be > 0
 - `GET_OPTION(restart)` (int) — restarts enabled flag; must be true
