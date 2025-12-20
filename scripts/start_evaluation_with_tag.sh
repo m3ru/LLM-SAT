@@ -1,14 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=evaluation
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=12
+#SBATCH --time=0-10:0:00
+#SBATCH --account=def-vganesh
 #SBATCH --mem=16G
-#SBATCH --time=0-10:00:00
-#SBATCH --qos=coc-ice
-#SBATCH --output=logs/evaluation_%j.log
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=mgopalan6@gatech.edu
+#SBATCH -o logs/evaluation_%j.log
 
 # Usage: sbatch scripts/start_evaluation_with_tag.sh <generation_tag> [additional args]
 # Example: sbatch scripts/start_evaluation_with_tag.sh chatgpt_data_generation_gpt4o_1
@@ -32,4 +26,3 @@ source ~/general/bin/activate
 export PYTHONPATH="./src:${PYTHONPATH:-}"
 
 # Run evaluation with the generation tag and any additional arguments
-python src/llmsat/pipelines/evaluation.py --run_all --generation_tag "$GENERATION_TAG" "$@"

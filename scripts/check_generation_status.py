@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
 Check the status of algorithms in the CHATGPT_DATA_GENERATION_TABLE.
 Shows which algorithms are ready for evaluation and their current status.

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
 Display PAR2 scores for all codes in a generation tag.
 """
