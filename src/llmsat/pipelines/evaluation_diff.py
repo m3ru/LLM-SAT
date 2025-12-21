@@ -1,0 +1,867 @@
+from __future__ import annotations
+
+import os
+import shutil
+import json
+import subprocess
+import re
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+import argparse
+from datetime import datetime
+from llmsat.llmsat import NOT_INITIALIZED, CHATGPT_DATA_GENERATION_TABLE, ALGORITHM
+from llmsat.utils.aws import (
+    get_algorithm_result,
+    get_algorithm_result_of_status,
+    get_ids_from_router_table,
+    get_code_result,
+    get_code_result_of_status,
+    update_code_result,
+    update_algorithm_result,
+    get_all_algorithm_ids,
+    get_all_algorithm_results,
+    ToAlgorithmResult,
+    ToCodeResult,
+)
+from llmsat.llmsat import (
+    CodeResult,
+    CodeStatus,
+    AlgorithmResult,
+    BASE_SOLVER_PATH,
+    SAT2025_BENCHMARK_PATH,
+    get_logger,
+    setup_logging,
+    AlgorithmStatus,
+    RECOVERED_ALGORITHM,
+)
+from llmsat.utils.paths import get_solver_dir, get_solver_solving_times_path, get_algorithm_dir,get_solver_result_dir
+from llmsat.utils.utils import wrap_command_to_slurm, wrap_command_to_slurm_array
+from llmsat.utils.diff_parser import apply_diff
+
+logger = get_logger(__name__)
+
+
+@dataclass
+class SolverEvaluationResult:
+    solver_path: str
+    solver_id: str
+    build_success: bool
+    par2_score: float
+    other_metrics: Dict[str, float]
+
+    def get_reward(self):
+        # compute the final scalar / vector reward
+        pass
+
+def parse_solving_time(content: str) -> Optional[float]:
+    # parse the solving time from the content
+    for line in content.split("\n"):
+        if "solve time" in line:
+            try:
+                value = float(line.split(" ")[-1])
+                logger.debug(f"Parsed solving time: {value}")
+                return value
+            except Exception as e:
+                logger.debug(f"Failed parsing solving time from line: {line} ({e})")
+                return None
+    return None
+
+def _compute_average(values: List[float]) -> Optional[float]:
+    non_none = [v for v in values if v is not None]
+    if not non_none:
+        logger.debug("No values to average (all None or empty).")
+        return None
+    avg = sum(non_none) / len(non_none)
+    logger.debug(f"Computed average over {len(non_none)} values: {avg}")
+    return avg
+
+def _get_activation_cmd() -> str:
+    # Use user-requested env activation instead of conda
+    logger.debug("Using activation command: source ../../general/bin/activate")
+    return "source ~/general/bin/activate"
+
+@dataclass
+class EvaluationPipeline:
+    """Unified evaluation entry point for designer and coder models."""
+    def __init__(self):
+        pass
+
+    # def clean_solving_logs(self, algorithm_id: str, code_id: str) -> None:
+    #     # clean the solving logs
+    #     solver_dir = get_solver_dir(algorithm_id, code_id)
+    #     logger.info(f"Cleaning solving logs in {solver_dir}")
+    #     if not os.path.isdir(solver_dir):
+    #         logger.debug(f"Solver dir does not exist: {solver_dir}")
+    #         return
+    #     removed = 0
+    #     for file in os.listdir(solver_dir):
+    #         if file.endswith(".solving.log") or file.endswith(".slurm.log"):
+    #             try:
+    #                 os.remove(f"{solver_dir}/{file}")
+    #                 removed += 1
+    #                 logger.debug(f"Removed log file: {file}")
+    #             except FileNotFoundError:
+    #                 pass
+    #     logger.info(f"Removed {removed} log files from {solver_dir}")
+
+    def test(self) -> None:
+        # test the evaluation pipeline
+        slurm_ids = self.slurm_run_evaluate("solvers/algorithm_1/code_1", SAT2025_BENCHMARK_PATH)
+        # self.slurm_collect_result([slurm_ids], "1")
+        # time = self.parse_solving_time("test/test.log")
+        # print(time)
+        # print(slurm_ids)
+        pass
+
+    def clean_solver(self, algorithm_id: str, code_id: str) -> None:
+        # clean the solver
+        solver_dir = get_solver_dir(algorithm_id, code_id)
+        logger.info(f"Removing solver directory {solver_dir}")
+        shutil.rmtree(solver_dir, ignore_errors=True)
+        logger.debug(f"Removed solver directory {solver_dir} (ignore_errors=True)")
+
+    def parse_solving_time(self, file_path: str) -> Optional[float]:
+        try:
+            lines = open(file_path, "r").readlines()
+        except Exception as e:
+            logger.warning(f"Failed to read log file {file_path}: {e}")
+            return 10000
+
+        if not lines:
+            logger.warning(f"Empty log file (likely timeout or crash): {file_path}")
+            return 10000
+
+        for line in reversed(lines):
+            if "process-time" in line:
+                match = re.search(r'(\d+\.?\d*)\s+seconds', line)
+                if match:
+                    time = float(match.group(1))
+                    return time
+            if "error" in line.lower():
+                logger.warning(f"Error found in solving log: {file_path}")
+                return 10000
+            # Check for common SLURM timeout/cancellation messages
+            if "CANCELLED" in line or "TIMEOUT" in line or "TIME LIMIT" in line:
+                logger.warning(f"SLURM timeout/cancellation detected: {file_path}")
+                return 10000
+
+        logger.warning(f"No process-time found in log (incomplete run): {file_path}")
+        return 10000
+
+    def collect_results(self, algorithm_id: str, code_id: str, force_recollect: bool = False) -> None:
+        # collect the results from the solver
+        solver_dir = get_solver_result_dir(algorithm_id, code_id)
+        result_path = get_solver_solving_times_path(algorithm_id, code_id)
+        if os.path.exists(result_path) and not force_recollect:
+            logger.warning(f"Results already collected for algorithm {algorithm_id}, code {code_id}")
+            return
+        print(f"Collecting results from {solver_dir}")
+        solving_times: Dict[str, float] = {}
+        timeouts_or_errors: List[str] = []  # Track instances that timed out or had errors
+        missing_logs: List[str] = []  # Track instances with no log files
+
+        if os.path.isdir(solver_dir):
+            for file in os.listdir(solver_dir):
+                if file.endswith(".solving.log"):
+                    instance_name = file.split(".")[0]
+                    instance_time = self.parse_solving_time(f"{solver_dir}/{file}")
+                    if instance_time is not None:
+                        solving_times[instance_name] = instance_time
+                        # Track instances that got the timeout penalty
+                        if instance_time >= 10000:
+                            timeouts_or_errors.append(instance_name)
+                        logger.debug(f"Parsed {file} -> {instance_time}")
+        else:
+            logger.warning(f"Solver directory missing: {solver_dir}")
+
+        # Check for missing benchmark instances (expected 400 total)
+        expected_benchmark_count = 400
+        if len(solving_times) < expected_benchmark_count:
+            missing_count = expected_benchmark_count - len(solving_times)
+            logger.warning(f"Missing results for {missing_count} instances out of {expected_benchmark_count}")
+
+        par2 = _compute_average(list(solving_times.values()))
+        logger.info(f"Computed PAR2 for algorithm {algorithm_id}, code {code_id}: {par2}")
+
+        # Log problematic instances summary
+        if timeouts_or_errors:
+            logger.warning(f"Found {len(timeouts_or_errors)} instances that timed out or had errors (10000s penalty)")
+            logger.info(f"Problematic instances: {', '.join(timeouts_or_errors[:10])}" +
+                       (f" ... and {len(timeouts_or_errors) - 10} more" if len(timeouts_or_errors) > 10 else ""))
+
+        # update the code result and algorithm result
+        code_result = get_code_result(code_id)
+        if code_result is not None:
+            code_result.par2 = par2
+            code_result.build_success = True
+            code_result.status = CodeStatus.Evaluated
+            update_code_result(code_result)
+            logger.debug(f"Updated code result par2={code_result.par2} for code_id={code_id}")
+        with open(result_path, "w") as f:
+            json.dump(solving_times, f)
+        print(f"Wrote solving times to {result_path}")
+        print(f"Completed: {len(solving_times)}/{expected_benchmark_count} instances")
+        if timeouts_or_errors:
+            print(f"Timeouts/Errors: {len(timeouts_or_errors)} instances")
+
+        # remove all the solvers
+        return par2
+
+    def slurm_collect_result(self, slurm_ids: List[int], code_id: str) -> None:
+        activate_python_path = _get_activation_cmd()
+        logger.info(f"Collecting SLURM results for code_id={code_id}, {len(slurm_ids)} jobs")
+        logger.info(f"Submitting job to collect results for code_id={code_id}")
+        code_result = get_code_result(code_id)
+        algorithm_id = code_result.algorithm_id
+        result_dir = get_solver_result_dir(algorithm_id, code_id)
+        cmd = f"{activate_python_path} && python src/llmsat/pipelines/evaluation.py --algorithm_id {algorithm_id} --code_id {code_id} --collect_result"
+        output_file = f"{result_dir}/00000000_collect_result.log"
+        slurm_cmd = wrap_command_to_slurm(
+            cmd,
+            output_file=output_file,
+            job_name=f"collect_result_{code_id}",
+            dependencies=[str(slurm_id) for slurm_id in slurm_ids],
+            dependency_type="afterany"  # Collect results even if some jobs fail/timeout
+        )
+        slurm_id = os.popen(slurm_cmd).read()
+        slurm_id = int(slurm_id.split()[-1])
+        logger.info(f"Submitted collect result job {slurm_id}, dependencies: {','.join([str(slurm_id) for slurm_id in slurm_ids])}")
+        logger.info(f"CMD: {slurm_cmd}")
+
+
+    def filter_code(self, code: str) -> str:
+        def normalize_escaped_whitespace(text: str) -> str:
+            # Always unescape common escape sequences
+            # This handles both JSON-escaped (\\n) and Python string literals (\n)
+            text = text.replace('\\n', '\n')
+            text = text.replace('\\t', '\t')
+            text = text.replace('\\r', '\r')
+            text = text.replace('\\"', '"')
+            text = text.replace("\\'", "'")
+            text = text.replace('\\\\', '\\')
+            # Also normalize Windows line endings
+            text = text.replace("\r\n", "\n")
+            return text
+
+        def extract_function(text: str, func_name: str) -> Optional[str]:
+            # Try to find a reasonable C function header for 'bool kissat_restarting'
+            # Allow optional qualifiers like 'static' or 'inline'
+            header_regex = rf"(?:static\s+)?(?:inline\s+)?bool\s+{func_name}\b[^\{{]*\{{"
+            m = re.search(header_regex, text, flags=re.DOTALL)
+            if m:
+                start = m.start()
+                open_brace = m.end() - 1  # points at '{'
+                brace = 0
+                i = open_brace
+                # Count braces to find the matching closing brace of the function
+                while i < len(text):
+                    c = text[i]
+                    if c == "{":
+                        brace += 1
+                    elif c == "}":
+                        brace -= 1
+                        if brace == 0:
+                            # include the closing brace
+                            end = i + 1
+                            return text[start:end]
+                    i += 1
+                return None
+            # Fallback: find function name and reconstruct a 'bool' header
+            name_idx = text.find(func_name)
+            if name_idx == -1:
+                return None
+            after_name = text[name_idx + len(func_name):]
+            brace_idx = after_name.find("{")
+            if brace_idx == -1:
+                return None
+            # Compose a normalized header starting at 'bool kissat_restarting'
+            header_prefix = f"bool {func_name}"
+            header_suffix = after_name[: brace_idx + 1]
+            header = f"{header_prefix}{header_suffix}"
+            # Now find the matching closing brace from this opening
+            rest = after_name[brace_idx + 1 :]
+            brace = 1
+            i = 0
+            while i < len(rest):
+                c = rest[i]
+                if c == "{":
+                    brace += 1
+                elif c == "}":
+                    brace -= 1
+                    if brace == 0:
+                        body_end = i + 1
+                        return header + rest[:body_end]
+                i += 1
+            return None
+
+        # Extract content within <code>...</code> if present
+        if "<code>" in code:
+            code = code.split("<code>")[1].split("</code>")[0]
+        else:
+            logger.warning("No <code> tag found in code")
+
+        # Normalize escaped whitespace (e.g., literal '\n') before parsing/writing
+        code = normalize_escaped_whitespace(code)
+
+        if "kissat_restarting" not in code:
+            logger.error("No kissat_restarting function found in code")
+            return None
+
+        extracted = extract_function(code, "kissat_restarting")
+        if not extracted:
+            logger.error("Failed to parse kissat_restarting function body")
+            return None
+        return extracted
+
+    def is_diff_format(self, code: str) -> bool:
+        """
+        Detect if code is in unified diff format.
+
+        Args:
+            code: Code or diff text
+
+        Returns:
+            True if code appears to be a unified diff
+        """
+        # Check for common diff markers in first 500 chars
+        code_start = code[:500]
+
+        # Look for unified diff markers
+        has_diff_header = '---' in code_start or '+++' in code_start
+        has_hunk_marker = '@@' in code_start
+
+        # Strong indicator: both headers and hunks
+        if has_diff_header and has_hunk_marker:
+            return True
+
+        # Weak indicator: just hunk markers (some LLMs might omit headers)
+        if has_hunk_marker:
+            logger.info("Detected @@ markers, treating as diff format")
+            return True
+
+        return False
+
+    def apply_diff_code(self, diff_text: str) -> Optional[str]:
+        """
+        Apply a unified diff to the baseline restart.c file.
+
+        Args:
+            diff_text: Unified diff text from LLM
+
+        Returns:
+            Modified restart.c content, or None if diff application fails
+        """
+        # Read baseline restart.c
+        baseline_path = os.path.join(BASE_SOLVER_PATH, "src/restart.c")
+
+        if not os.path.exists(baseline_path):
+            logger.error(f"Baseline restart.c not found at {baseline_path}")
+            return None
+
+        try:
+            with open(baseline_path, "r") as f:
+                baseline_content = f.read()
+        except Exception as e:
+            logger.error(f"Failed to read baseline restart.c: {e}")
+            return None
+
+        # Apply diff using diff_parser
+        modified_content = apply_diff(baseline_content, diff_text)
+
+        if modified_content is None:
+            logger.error("Failed to apply diff to baseline restart.c")
+            return None
+
+        logger.info("Successfully applied diff to baseline restart.c")
+        return modified_content
+
+    def build_solver(self, code_result: CodeResult) -> str: # if success, return the solver path, otherwise return None
+        logger.info(f"Building solver for code_result={code_result}")
+        code = code_result.code
+
+        # Detect if code is a diff or full function
+        is_diff = self.is_diff_format(code)
+
+        if is_diff:
+            logger.info("Detected diff format, applying diff to baseline restart.c")
+            modified_restart_c = self.apply_diff_code(code)
+            if modified_restart_c is None:
+                logger.error("Failed to apply diff")
+                return None
+        else:
+            logger.info("Detected full function format, using filter_code")
+            code = self.filter_code(code)
+            if code is None:
+                logger.error("Failed to find kissat_restarting function in code")
+                return None
+            modified_restart_c = None  # Will use marker-based replacement
+
+        # copy original solver to a new folder
+        new_solver_path = get_solver_dir(code_result.algorithm_id, code_result.id)
+        logger.info(f"Building solver at {new_solver_path} for algorithm={code_result.algorithm_id}, code={code_result.id}")
+        if os.path.exists(new_solver_path):
+            shutil.rmtree(new_solver_path)
+        shutil.copytree(BASE_SOLVER_PATH, new_solver_path)
+
+        # replace the code in the new solver
+        restart_file = f"{new_solver_path}/src/restart.c"
+
+        if is_diff:
+            # Write the complete modified restart.c file
+            with open(restart_file, "w") as f:
+                f.write(modified_restart_c)
+            logger.debug(f"Replaced entire restart.c with diff-modified version")
+        else:
+            # Original marker-based replacement logic
+            # First read the file to find where to insert the code
+            with open(restart_file, "r") as f:
+                lines = f.readlines()
+
+            # Find LLMSAT start/end markers and replace the block between them
+            start_idx = None
+            end_idx = None
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if start_idx is None and (line.startswith("//LLMSAT start") or stripped.startswith("// LLMSAT: start")):
+                    start_idx = i
+                    continue
+                if start_idx is not None and (line.startswith("//LLMSAT end") or stripped.startswith("// LLMSAT: end")):
+                    end_idx = i
+                    break
+
+            if start_idx is None:
+                raise ValueError("Could not find '//LLMSAT start' marker in restart.c")
+            if end_idx is None:
+                raise ValueError("Could not find '//LLMSAT end' marker in restart.c")
+            logger.debug(f"Replacing lines ({start_idx+1}, {end_idx}) in restart.c between LLMSAT markers")
+
+            # Write the modified content: keep start marker line, replace inner block, keep end marker and rest
+            with open(restart_file, "w") as f:
+                # Up to and including start marker
+                f.writelines(lines[: start_idx + 1])
+                # New code block (ensure trailing newline)
+                f.write(code.rstrip() + "\n")
+                # From end marker to end (preserve end marker)
+                f.writelines(lines[end_idx:])
+            logger.debug(f"Injected code into {restart_file}")
+
+        # try compile the solver
+        try:
+            logger.info(f"Compiling solver at {new_solver_path}")
+            configure_proc = subprocess.run(
+                ["./configure"],
+                cwd=new_solver_path,
+                capture_output=True,
+                text=True,
+            )
+            make_proc = None
+            if configure_proc.returncode == 0:
+                make_proc = subprocess.run(
+                    ["make", "-j1"],
+                    cwd=new_solver_path,
+                    capture_output=True,
+                    text=True,
+                )
+                build_success = make_proc.returncode == 0
+            else:
+                build_success = False
+            # print(build_success)
+            # exit()
+            # Aggregate logs from both phases (always record)
+            logs = []
+            logs.append("=== ./configure stdout ===\n" + (configure_proc.stdout or ""))
+            logs.append("=== ./configure stderr ===\n" + (configure_proc.stderr or ""))
+            if make_proc is not None:
+                logs.append("=== make stdout ===\n" + (make_proc.stdout or ""))
+                logs.append("=== make stderr ===\n" + (make_proc.stderr or ""))
+            output = "\n".join(logs)
+
+            # Always write a full build log
+            algorithm_dir = get_algorithm_dir(code_result.algorithm_id)
+            build_log_path = f"{algorithm_dir}/code_{code_result.id}.build.log"
+            with open(build_log_path, "w") as f:
+                f.write(output)
+            logger.info(f"Wrote build log to {build_log_path}")
+            # also copy the restart.c to the algorithm directory
+            shutil.copy2(restart_file, f"{algorithm_dir}/code_{code_result.id}.restart.c")
+            logger.info(f"Copied restart.c to {algorithm_dir}/code_{code_result.id}.restart.c")
+
+            if not build_success:
+                algorithm_dir = get_algorithm_dir(code_result.algorithm_id)
+                failed_log_path = f"{algorithm_dir}/code_{code_result.id}.build_failed.log"
+                with open(failed_log_path, "w") as f:
+                    f.write(output)
+                logger.warning(f"Build failed for solver at {new_solver_path}, output saved to {failed_log_path}")
+            # if build_success remains True, proceed below
+        except Exception as e:
+            build_success = False
+        if build_success:
+            new_solver_bin_path = f"{new_solver_path}/build/kissat"
+            os.makedirs(new_solver_path, exist_ok=True)
+            try:
+                shutil.copy2(new_solver_bin_path, f"{new_solver_path}/kissat")
+                logger.info(f"Build succeeded, binary copied to {new_solver_path}/kissat")
+            except Exception:
+                return new_solver_path
+            return new_solver_path
+        else:
+            logger.warning(f"Build failed for solver at {new_solver_path}")
+            return None
+        return 
+
+    def slurm_run_evaluate(self, solver_path: str, benchmark_path: str, result_dir: str, max_jobs: int = 200) -> List[int]:
+        """
+        Submit solver evaluation using a SLURM job array (counts as 1 job toward QOS limit).
+        
+        Creates a CNF file list and a wrapper script, then submits a single job array
+        that runs the solver on all benchmarks.
+        """
+        logger.info(f"Submitting SLURM job array for solver {solver_path} on benchmarks {benchmark_path}")
+        
+        # Ensure result directory exists
+        os.makedirs(result_dir, exist_ok=True)
+        
+        # Collect CNF files to evaluate (skip already completed ones)
+        cnf_files = []
+        jobs_skipped = 0
+        for benchmark_file in sorted(os.listdir(benchmark_path)):
+            if benchmark_file.endswith(".cnf"):
+                if os.path.exists(f"{result_dir}/{benchmark_file}.solving.log"):
+                    jobs_skipped += 1
+                    continue
+                cnf_files.append(benchmark_file)
+        
+        if not cnf_files:
+            logger.info(f"All {jobs_skipped} benchmarks already evaluated, nothing to submit")
+            return []
+        
+        # Limit to max_jobs if needed
+        if len(cnf_files) > max_jobs:
+            logger.warning(f"Limiting evaluation to {max_jobs} benchmarks (out of {len(cnf_files)} remaining)")
+            cnf_files = cnf_files[:max_jobs]
+        
+        # Write CNF file list for the job array
+        cnf_list_path = f"{result_dir}/cnf_file_list.txt"
+        with open(cnf_list_path, "w") as f:
+            for cnf_file in cnf_files:
+                f.write(f"{cnf_file}\n")
+        logger.info(f"Wrote {len(cnf_files)} CNF files to {cnf_list_path}")
+        
+        # Create wrapper script for job array
+        script_path = f"{result_dir}/run_solver_array.sh"
+        script_content = f"""#!/bin/bash
+# SLURM job array script for solver evaluation
+# Each array task reads its assigned CNF file from the list
+
+CNF_LIST="{cnf_list_path}"
+SOLVER="{solver_path}/build/kissat"
+BENCHMARK_PATH="{benchmark_path}"
+RESULT_DIR="{result_dir}"
+
+# Get the CNF file for this array task (0-indexed)
+CNF_FILE=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$CNF_LIST")
+
+if [ -z "$CNF_FILE" ]; then
+    echo "ERROR: No CNF file found for array task $SLURM_ARRAY_TASK_ID"
+    exit 1
+fi
+
+echo "Running solver on $CNF_FILE (array task $SLURM_ARRAY_TASK_ID)"
+"$SOLVER" "$BENCHMARK_PATH/$CNF_FILE" > "$RESULT_DIR/$CNF_FILE.solving.log" 2>&1
+EXIT_CODE=$?
+echo "Solver finished with exit code $EXIT_CODE"
+exit $EXIT_CODE
+"""
+        with open(script_path, "w") as f:
+            f.write(script_content)
+        os.chmod(script_path, 0o755)
+        logger.info(f"Created job array script at {script_path}")
+        
+        # Submit job array (0-indexed, so 0 to N-1)
+        array_range = f"0-{len(cnf_files) - 1}"
+        slurm_cmd = wrap_command_to_slurm_array(
+            script_path=script_path,
+            array_range=array_range,
+            mem="8G",
+            time="01:23:20",
+            job_name=f"solve_array",
+            output_file=f"{result_dir}/slurm_array_%a.log",
+            max_concurrent=100,  # Limit concurrent tasks to avoid overwhelming the cluster
+        )
+        logger.info(f"Submitting job array with command: {slurm_cmd}")
+        
+        try:
+            slurm_output = os.popen(slurm_cmd).read().strip()
+            
+            if not slurm_output or "error" in slurm_output.lower():
+                logger.error(f"Failed to submit job array: {slurm_output}")
+                return []
+            
+            # Parse the job array ID (e.g., "Submitted batch job 12345")
+            slurm_id = int(slurm_output.split()[-1])
+            logger.info(f"Submitted job array {slurm_id} with {len(cnf_files)} tasks ({jobs_skipped} skipped)")
+            
+            # Return the base job ID for dependency tracking
+            return [slurm_id]
+            
+        except (ValueError, IndexError) as e:
+            logger.error(f"Failed to parse SLURM job ID from output: '{slurm_output}' - {e}")
+            return []
+
+    def run_single_solver(self, code_id: str) -> None:  # process single code
+        """Run evaluation for configured components."""
+        code_result = get_code_result(code_id)
+        if code_result is None:
+            logger.error(f"Code result not found for code_id={code_id}")
+            return
+        # if code_result.status == CodeStatus.BuildFailed:
+        #     logger.warning(f"Code result {code_id} is already build failed, skip?")
+        #     return
+        if code_result.status == CodeStatus.Evaluating:
+            logger.warning(f"Code result {code_id} is already evaluating, skip")
+            return
+        assert code_result is not None, "Code result not found"
+        logger.info(f"Running single solver for code_id={code_id}, algorithm_id={code_result.algorithm_id}")
+        solver_path = self.build_solver(code_result) # build in evaluation
+        if solver_path is not None: # build successful
+            logger.info(f"Solver built successfully: {solver_path}")
+            result_dir = get_solver_result_dir(code_result.algorithm_id, code_result.id)
+            slurm_ids = self.slurm_run_evaluate(solver_path, SAT2025_BENCHMARK_PATH, result_dir)
+            # slurm_ids = []
+            code_result.status = CodeStatus.Evaluating
+            update_code_result(code_result) 
+            self.slurm_collect_result(slurm_ids, code_id)
+        else: # build failed
+            code_result.status = CodeStatus.BuildFailed
+            update_code_result(code_result) 
+            logger.error("Solver build failed")
+    
+    def read_current_progress(self) -> None:
+        # read the current progress from the progress file
+        pass
+
+    def read_algorithm(self, algorithm_id: str) -> AlgorithmResult:
+        logger.debug(f"Reading algorithm result for id={algorithm_id}")
+        result = get_algorithm_result(algorithm_id)
+        logger.info(f"Read algorithm {result.id} with {len(result.code_id_list or [])} code ids")
+        return result
+
+    def run_all_solvers(self, algorithm_id: str) -> None:  # pragma: no cover - declaration only
+        """Run evaluation for all configured components."""
+        logger.info(f"Running evaluation for algorithm {algorithm_id}")
+        algorithm = self.read_algorithm(algorithm_id)
+        os.makedirs(f"solvers/algorithm_{algorithm_id}", exist_ok=True)
+        code_id_list = self.generate_or_read_code(algorithm) # actually should only read here, generation should be done in a separate process
+        logger.info(f"Found {len(code_id_list)} code ids to evaluate for algorithm {algorithm_id}")
+        for code_id in code_id_list:
+            logger.info(f"Starting evaluation for code_id={code_id}")
+            self.run_single_solver(code_id)
+        algorithm.status = AlgorithmStatus.Evaluating
+        update_algorithm_result(algorithm)
+
+        # for code_id in code_id_list:
+        #     logger.debug(f"Starting evaluation for code_id={code_id}")
+        #     self.run_single_solver(code_id)
+    def fix_algorithm_code_mapping(self, algorithm: AlgorithmResult, all_code_id_list: List[str]) -> None:
+        # fix the algorithm code mapping
+        if algorithm.code_id_list[0].strip('"') == "NOT_INITIALIZED":
+            return
+        logger.info(f"Fixing algorithm {algorithm.id} code mapping to {algorithm.code_id_list} code ids")
+        code_registered = algorithm.code_id_list 
+        for code_id in code_registered:
+            if code_id in all_code_id_list:
+                print(code_id)
+                exit()
+
+    def generate_or_read_code(self, algorithm: AlgorithmResult) -> List[str]:
+        # Return list of code ids to evaluate
+        ids = algorithm.code_id_list or []
+        logger.debug(f"generate_or_read_code returning {len(ids)} code ids")
+        return ids
+        
+def find_codes(code_ids: List[str]) -> Dict[str, str]:
+    """
+    Locally find where the code directories are when algorithm IDs are missing.
+    Searches through all algorithm directories to find matching code directories.
+    
+    Args:
+        code_ids: List of code IDs to search for
+    
+    Returns:
+        Dictionary mapping code_id -> directory path for found code directories
+    """
+    directories = {}
+    solvers_base = "solvers"
+    
+    if not os.path.exists(solvers_base):
+        logger.warning(f"Solvers base directory does not exist: {solvers_base}")
+        return directories
+    
+    # Iterate through all algorithm directories
+    for algo_dir in os.listdir(solvers_base):
+        algo_path = os.path.join(solvers_base, algo_dir)
+        
+        # Skip if not a directory or doesn't match algorithm directory pattern
+        if not os.path.isdir(algo_path) or not algo_dir.startswith("algorithm_"):
+            continue
+        
+        # Check each code_id in this algorithm directory
+        for code_id in code_ids:
+            code_dir_name = f"code_{code_id}"
+            code_path = os.path.join(algo_path, code_dir_name)
+            
+            # If the code directory exists, add it to results
+            if os.path.isdir(code_path):
+                directories[code_id] = code_path
+                logger.debug(f"Found code directory: {code_path} for code_id: {code_id}")
+    
+    logger.info(f"Found {len(directories)} code directories for {len(code_ids)} code IDs")
+    return directories
+def restore_codes(algorithm_ids: List[str]) -> None:
+    # restore the codes
+    for algorithm_id in algorithm_ids:
+        algorithm = get_algorithm_result(algorithm_id)
+        code_ids = algorithm.code_id_list
+        for code_id in code_ids:
+            code = get_code_result(code_id)
+            if code is None:
+                logger.error(f"Code result not found for code_id={code_id}")
+                continue
+            code.algorithm_id = algorithm_id
+            update_code_result(code)
+            logger.info(f"Restored code {code_id} for algorithm {algorithm_id}")
+
+def restore_algorithms(algorithm_ids: List[str]) -> List[AlgorithmResult]:
+    # restore the algorithms
+    for algorithm_id in algorithm_ids:
+        # algorithm = get_algorithm_result(algorithm_id)
+        algorithm = AlgorithmResult(
+            id=algorithm_id,
+            code_id_list=NOT_INITIALIZED,
+            status=AlgorithmStatus.Evaluating,
+            last_updated=datetime.now(),
+            prompt="",
+            par2=NOT_INITIALIZED,
+            error_rate=NOT_INITIALIZED,
+            algorithm=RECOVERED_ALGORITHM,
+            other_metrics=NOT_INITIALIZED,
+        )
+        # find code ids in the algorithm directory
+        algorithm_dir = get_algorithm_dir(algorithm_id)
+        code_ids = []
+        # find directories in the algorithm directory to restore the code ids
+        for code_dir in os.listdir(algorithm_dir):
+            if code_dir.startswith("code_") and os.path.isdir(os.path.join(algorithm_dir, code_dir)):
+                code_ids.append(code_dir.split("code_")[1])
+        algorithm.code_id_list = code_ids
+        update_algorithm_result(algorithm)
+        for code_id in code_ids:
+            code = get_code_result(code_id)
+            if code is None:
+                logger.error(f"Code result not found for code_id={code_id}")
+                continue
+            code.algorithm_id = algorithm_id
+            update_code_result(code)
+            logger.info(f"Restored code {code_id} for algorithm {algorithm_id}")
+        logger.info(f"Restored algorithm {algorithm_id} code mapping to {len(code_ids)} code ids")
+
+def rescue_data():
+    code_results = get_code_result_of_status(CodeStatus.Evaluated)
+    code_ids = []
+    for code_result in code_results:
+        if code_result.algorithm_id is None:
+            code_ids.append(code_result.id)
+    code_ids = [code_result.id for code_result in code_results]
+    code_dirs = find_codes(code_ids)
+    algorithm_ids = set()
+    for code_id, code_dir in code_dirs.items():
+        algorithm_id = code_dir.split("/")[-2].split("algorithm_")[1]
+        algorithm_ids.add(algorithm_id)
+        # algorithm = get_algorithm_result(algorithm_id)
+        # algorithm.code_id_list = NOT_INITIALIZED
+        # update_algorithm_result(algorithm)
+    logger.info(f"algorithm ids: {algorithm_ids}")
+    restore_algorithms(list(algorithm_ids))
+
+def main():
+    setup_logging()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--algorithm_id", type=str, default=None)
+    parser.add_argument("--code_id", type=str, default=None)
+    parser.add_argument("--first_n", type=int, default=None)
+    parser.add_argument("--run_all", action="store_true", default=False)
+    parser.add_argument("--collect_result", action="store_true", default=False)
+    parser.add_argument("--collect_all_results", action="store_true", default=False)
+    parser.add_argument("--test", action="store_true", default=False)
+    parser.add_argument("--generation_tag", type=str, default=None, help="Generation tag to evaluate (required with --run_all or --collect_all_results)")
+    args = parser.parse_args()
+    evaluation_pipeline = EvaluationPipeline()
+    # evaluation_pipeline.run_all_solvers("1")
+
+    if args.run_all:
+        assert args.algorithm_id is None, "Cannot specify both --algorithm_id and --run_all"
+        # Determine which generation tag to use
+        if args.generation_tag:
+            generation_tag = args.generation_tag
+        else:
+            # Fall back to hardcoded default for backward compatibility
+            generation_tag = "kissatmab_experiment3"
+            logger.warning(f"No --generation_tag specified, using default: {generation_tag}")
+
+        logger.info(f"Evaluating algorithms from generation tag: {generation_tag}")
+        algorithm_ids = get_ids_from_router_table(CHATGPT_DATA_GENERATION_TABLE, generation_tag)
+        algorithms = [get_algorithm_result(algorithm_id) for algorithm_id in algorithm_ids]
+        # algorithms = get_algorithm_result_of_status(AlgorithmStatus.CodeGenerated)
+        logger.info(f"Found {len(algorithms)} algorithms to evaluate")
+        if args.first_n is not None:
+            algorithms = algorithms[:args.first_n]
+    elif args.algorithm_id is not None:
+        assert args.first_n is None, "Cannot specify both --algorithm_id and --first_n"
+        algorithms = [get_algorithm_result(args.algorithm_id)]
+        if args.collect_result:
+            evaluation_pipeline.collect_results(args.algorithm_id, args.code_id, force_recollect=True)
+            return
+    elif args.collect_all_results:
+        assert args.algorithm_id is None, "Cannot specify both --algorithm_id and --collect_all_results"
+        # Determine which generation tag to use
+        if args.generation_tag:
+            generation_tag = args.generation_tag
+        else:
+            # Fall back to ALGORITHM constant for backward compatibility
+            generation_tag = ALGORITHM
+            logger.warning(f"No --generation_tag specified, using default: {generation_tag}")
+
+        logger.info(f"Collecting results for generation tag: {generation_tag}")
+        algorithm_ids = get_ids_from_router_table(CHATGPT_DATA_GENERATION_TABLE, generation_tag)
+        logger.info(f"Found {len(algorithm_ids)} algorithms to collect results for")
+        for algorithm_id in algorithm_ids:
+            algorithm_result = get_algorithm_result(algorithm_id)
+            code_ids = algorithm_result.code_id_list
+            for code_id in code_ids:
+                evaluation_pipeline.collect_results(algorithm_id, code_id, force_recollect=True)
+        return
+    elif args.test:
+        evaluation_pipeline.test()
+        return
+    else:
+        assert False, "Must specify either --run_all or --algorithm_id"
+    logger.info(f"Running evaluation for {len(algorithms)} algorithms")
+    for algorithm in algorithms:
+        # print(algorithm.algorithm)
+        logger.info(algorithm.id)
+        evaluation_pipeline.run_all_solvers(algorithm.id)
+
+def test():
+    setup_logging()
+
+    algorithms = get_algorithm_result_of_status(AlgorithmStatus.CodeGenerated)
+    # algorithms = get_all_algorithm_results()
+    logger.info(f"Found {len(algorithms)} algorithms to evaluate")
+    for algorithm in algorithms:
+        logger.info(f"{algorithm.id}, {algorithm.status}")
+
+
+if __name__ == "__main__":
+    # test()
+    main()
+

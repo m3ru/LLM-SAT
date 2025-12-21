@@ -1,0 +1,133 @@
+You are implementing a restart trigger for the Kissat-MAB SAT solver. Generate a unified diff that modifies ONLY the tunable parameters (numeric literals, coefficients, thresholds) in the restart.c file.
+
+### Task
+Given the baseline restart.c code below and an algorithm specification, generate a unified diff that tunes the parameters to implement the algorithm while keeping all control flow, variable names, and function structure identical.
+
+### Requirements
+- Output a valid unified diff patch
+- Modify ONLY numeric literals and parameter values
+- Keep all variable names, control flow, and function calls unchanged
+- Focus on tuning: threshold values, multipliers, margin calculations, coefficients
+- The diff will be applied to the complete restart.c file
+
+### Baseline restart.c Code
+(Paste the complete baseline restart.c code here)
+
+### Available Headers (already included in restart.c)
+```c
+#include "restart.h"
+#include "internal.h"  // Provides access to solver struct and all subsystems
+#include "reluctant.h"
+#include <inttypes.h>
+#include <math.h>
+```
+
+### Available Macros
+
+**Statistics**:
+- `CONFLICTS` → `solver->statistics.conflicts`
+- `DECISIONS` → `solver->statistics.decisions`
+
+**Averages** (automatically selects focused/stable):
+- `AVERAGE(fast_glue)` → `solver->averages[solver->stable].fast_glue.value`
+- `AVERAGE(slow_glue)` → `solver->averages[solver->stable].slow_glue.value`
+- `AVERAGE(decision_rate)` → `solver->averages[solver->stable].decision_rate.value`
+
+**Options**:
+- `GET_OPTION(restart)` → `solver->options.restart` (bool-like int)
+- `GET_OPTION(restartmargin)` → `solver->options.restartmargin` (int 0-25)
+- `GET_OPTION(restartint)` → `solver->options.restartint` (int)
+
+### Available Signals
+
+**State**:
+```c
+solver->stable          // bool: true=stable mode, false=focused mode
+solver->level           // unsigned: current decision level
+solver->unassigned      // unsigned: unassigned variables count
+```
+
+**Statistics**:
+```c
+CONFLICTS                        // uint64_t (macro)
+DECISIONS                        // uint64_t (macro)
+solver->statistics.restarts      // uint64_t
+```
+
+**Limits**:
+```c
+solver->limits.restart.conflicts // uint64_t: next restart threshold
+```
+
+**Quality Metrics**:
+```c
+AVERAGE(fast_glue)      // double (macro): recent clause quality EMA
+AVERAGE(slow_glue)      // double (macro): baseline clause quality EMA
+AVERAGE(decision_rate)  // double (macro): decisions/conflict EMA
+```
+
+**MAB Signals** (observe only, do not modify):
+```c
+solver->mab              // bool: MAB enabled
+solver->heuristic        // unsigned: 0=VSIDS, 1=CHB
+solver->mab_reward[0]    // double: VSIDS cumulative reward
+solver->mab_reward[1]    // double: CHB cumulative reward
+solver->mab_select[0]    // unsigned: VSIDS selection count
+solver->mab_select[1]    // unsigned: CHB selection count
+solver->mab_decisions    // double: decisions since last restart
+solver->mab_conflicts    // unsigned: conflicts since last restart
+solver->mab_chosen_tot   // unsigned: variable selections since last restart
+solver->mabc             // double: UCB exploration constant
+```
+
+### Available Functions
+
+**Required**:
+- `assert(condition)` — assertion (required as first line)
+
+**Helpers**:
+- `kissat_reluctant_triggered(reluctant *r)` → `bool`
+  Usage: `kissat_reluctant_triggered(&solver->reluctant)`
+
+- `kissat_extremely_verbose(kissat *s, const char *fmt, ...)` → `void`
+  Optional logging for debugging
+
+**Math** (from math.h):
+- `log(double)`, `log2(double)`, `sqrt(double)`, etc.
+
+### Algorithm to Implement
+{algorithm}
+
+### Output Format
+Wrap your unified diff in `<diff>` tags (no other text outside tags):
+
+<diff>
+--- restart.c
++++ restart.c
+@@ -128,1 +128,1 @@
+-  const double margin = (100.0 + GET_OPTION(restartmargin)) / 100.0;
++  const double margin = (98.5 + GET_OPTION(restartmargin)) / 100.0;
+@@ -130,1 +130,1 @@
+-  return (limit <= fast);
++  return (limit <= fast * 1.02);
+</diff>
+
+### Diff Guidelines
+- Use unified diff format with @@ headers
+- Include 3 lines of context before and after each change
+- Line numbers should correspond to the baseline code
+- Focus ONLY on changing numeric literals (e.g., 100.0 → 98.5)
+- You may add new numeric constants or modify existing calculations
+- Do NOT change variable names, control flow, or function calls
+
+### Example Parameter Changes
+Good changes (parameters only):
+- `100.0` → `98.5` (changing a constant)
+- `margin * slow` → `margin * 1.05 * slow` (adding multiplier)
+- `limit <= fast` → `limit <= fast + 0.02` (adding offset)
+
+Bad changes (avoid these):
+- Renaming variables
+- Adding new if statements
+- Changing function calls
+- Modifying assert statements
