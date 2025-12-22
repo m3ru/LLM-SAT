@@ -37,11 +37,11 @@ def read_algorithm_prompt_file(path: str) -> str:
         return f.read()
 
 
-def create_batch_input_file(prompt: str, output_path: str, n_requests: int = 10, model: str = "gpt-4.1"):
+def create_batch_input_file(prompt: str, output_path: str, n_requests: int = 10, model: str = "gpt-5.1"):
     logger.info(f"Creating batch input file for {n_requests} requests")
     # Reuse JSONL record structure from llmsat.data.create_prompt
     system_message = os.environ.get("LLMSAT_SYSTEM_MESSAGE", "You are an AI researcher specialising in SAT solver heuristics.")
-    model = os.environ.get("OPENAI_MODEL", "gpt-4.1")
+    model = os.environ.get("OPENAI_MODEL", "gpt-5.1")
     try:
         temperature = float(os.environ.get("OPENAI_TEMPERATURE", "0.7"))
     except Exception:
@@ -186,7 +186,7 @@ def parse_algorithm_response(response: Dict[str, Any]) -> str:
         return raw_text
 
 
-def generate_data(designer_prompt_path: str, code_prompt_template_path: str, generation_tag: str, n_algorithms: int = 500, n_codes: int = 10, use_cache=False, model: str = "gpt-4o"):
+def generate_data(designer_prompt_path: str, code_prompt_template_path: str, generation_tag: str, n_algorithms: int = 500, n_codes: int = 10, use_cache=False, model: str = "gpt-5.1"):
     """
     Generate algorithm and diff data using LLM batch API.
 
@@ -338,9 +338,9 @@ def main():
         generation_tag="diff_testing",
         designer_prompt_path="./data/prompts/kissat_mab.txt",
         code_prompt_template_path="./data/prompts/kissat_mab_code_diff.txt",
-        n_algorithms=10,
+        n_algorithms=2,
         n_codes=5,
-        model="gpt-4o",
+        model="gpt-5.1",
     )
 
 
