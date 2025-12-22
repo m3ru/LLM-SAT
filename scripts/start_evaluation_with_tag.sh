@@ -26,4 +26,4 @@ source ~/general/bin/activate
 export PYTHONPATH="./src:${PYTHONPATH:-}"
 
 # Run evaluation with the generation tag and any additional arguments
-python src/llmsat/pipelines/evaluation.py --run_all --generation_tag "$GENERATION_TAG" "$@"
+python src/llmsat/pipelines/evaluation_diff.py --run_all --generation_tag "$GENERATION_TAG" "$@"
