@@ -9,7 +9,7 @@
 # Example: sbatch scripts/start_evaluation_with_tag.sh chatgpt_data_generation_gpt4o_1 --first_n 5
 
 set -euo pipefail
-cd "$SLURM_SUBMIT_DIR"
+# cd "$SLURM_SUBMIT_DIR"
 
 if [ -z "$1" ]; then
     echo "Error: generation_tag not provided"
