@@ -351,6 +351,16 @@ class EvaluationPipeline:
         Returns:
             Modified restart.c content, or None if diff application fails
         """
+        # Normalize escaped whitespace in diff text (e.g., \\n -> \n)
+        # This handles cases where diff is stored with escaped newlines
+        diff_text = diff_text.replace('\\n', '\n')
+        diff_text = diff_text.replace('\\t', '\t')
+        diff_text = diff_text.replace('\\r', '\r')
+        diff_text = diff_text.replace('\\"', '"')
+        diff_text = diff_text.replace("\\'", "'")
+        diff_text = diff_text.replace('\\\\', '\\')
+        diff_text = diff_text.replace("\r\n", "\n")
+
         # Read baseline restart.c
         baseline_path = os.path.join(BASE_SOLVER_PATH, "src/restart.c")
 
