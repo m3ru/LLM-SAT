@@ -214,7 +214,7 @@ class EvaluationPipeline:
         code_result = get_code_result(code_id)
         algorithm_id = code_result.algorithm_id
         result_dir = get_solver_result_dir(algorithm_id, code_id)
-        cmd = f"{activate_python_path} && python src/llmsat/pipelines/evaluation.py --algorithm_id {algorithm_id} --code_id {code_id} --collect_result"
+        cmd = f"{activate_python_path} && python src/llmsat/pipelines/evaluation_diff.py --algorithm_id {algorithm_id} --code_id {code_id} --collect_result"
         output_file = f"{result_dir}/00000000_collect_result.log"
         slurm_cmd = wrap_command_to_slurm(
             cmd,
@@ -396,10 +396,7 @@ class EvaluationPipeline:
                 return None
             modified_restart_c = None  # Will use marker-based replacement
 
-        # copy original solver to a new folder
-        new_solver_path = get_solver_dir(code_result.algorithm_id, code_result.id)
-        logger.info(f"Building solver at {new_solver_path} for algorithm={code_result.algorithm_id}, code={code_result.id}")
-        if os.path.exists(new_solver_path):
+        # copy original solver to a new folder new_solver_path = get_solver_dir(code_result.algorithm_id, code_result.id) logger.info(f"Building solver at {new_solver_path} for algorithm={code_result.algorithm_id}, code={code_result.id}") if os.path.exists(new_solver_path):
             shutil.rmtree(new_solver_path)
         shutil.copytree(BASE_SOLVER_PATH, new_solver_path)
 
