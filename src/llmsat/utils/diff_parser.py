@@ -5,14 +5,14 @@ Used for LLM-generated parameter tuning diffs.
 
 from typing import Optional
 import logging
-from unidiff import PatchSet
+import subprocess
 
 logger = logging.getLogger(__name__)
 
 
 def apply_diff(baseline_content: str, diff_text: str) -> Optional[str]:
     """
-    Apply a unified diff to baseline content.
+    Apply a unified diff to baseline content using GNU patch with fuzzy matching.
 
     Args:
         baseline_content: Original file content as string
@@ -22,74 +22,38 @@ def apply_diff(baseline_content: str, diff_text: str) -> Optional[str]:
         Modified content as string, or None if diff fails to apply
     """
     try:
-        # Parse the diff using unidiff
-        patch = PatchSet(diff_text)
+        # Apply patch with fuzzy matching via stdin/stdout
+        # -F 3: Allow up to 3 lines of fuzz (context mismatch)
+        # -o -: Output to stdout
+        result = subprocess.run(
+            ["patch", "-F", "3", "-o", "-"],
+            input=f"{diff_text}\n{baseline_content}",
+            capture_output=True,
+            text=True
+        )
 
-        if not patch:
-            logger.error("No patches found in diff text")
+        if result.returncode != 0:
+            logger.error(f"GNU patch failed with return code {result.returncode}")
+            logger.error(f"Stderr: {result.stderr}")
+            logger.debug(f"Stdout: {result.stdout}")
+            logger.debug(f"Diff text:\n{diff_text}")
             return None
 
-        # Split baseline into lines for processing
-        lines = baseline_content.split('\n')
+        # Log any warnings from patch
+        if result.stderr and "offset" in result.stderr.lower():
+            logger.info(f"Patch applied with offset: {result.stderr}")
 
-        # Apply each patch (typically just one for restart.c)
-        for patched_file in patch:
-            logger.debug(f"Applying patch to {patched_file.path}")
+        patched_content = result.stdout
+        logger.info("Successfully applied diff using GNU patch")
+        return patched_content
 
-            # Apply hunks in reverse order to avoid line number shifts
-            for hunk in reversed(patched_file):
-                lines = apply_hunk(lines, hunk)
-
-        return '\n'.join(lines)
-
+    except FileNotFoundError:
+        logger.error("GNU patch command not found. Please install patch utility.")
+        return None
     except Exception as e:
         logger.error(f"Failed to apply diff: {e}")
         logger.debug(f"Diff text:\n{diff_text}")
         return None
-
-
-def apply_hunk(lines: list, hunk) -> list:
-    """
-    Apply a single hunk to a list of lines.
-
-    Args:
-        lines: List of lines from the file
-        hunk: unidiff.Hunk object
-
-    Returns:
-        Modified list of lines
-    """
-    # Hunk line numbers are 1-indexed
-    # source_start is where the hunk begins in the original file
-    source_start = hunk.source_start - 1  # Convert to 0-indexed
-
-    # Build the modified section
-    new_lines = []
-    source_pos = 0
-
-    for line in hunk:
-        if line.is_added:
-            # Add new line (strip the leading '+')
-            new_lines.append(line.value.rstrip('\n'))
-        elif line.is_removed:
-            # Skip removed lines (they won't be in output)
-            source_pos += 1
-        elif line.is_context:
-            # Context line - keep as is
-            new_lines.append(line.value.rstrip('\n'))
-            source_pos += 1
-
-    # Calculate how many source lines this hunk affects
-    source_length = hunk.source_length
-
-    # Replace the affected section
-    result = (
-        lines[:source_start] +           # Before hunk
-        new_lines +                       # Modified section
-        lines[source_start + source_length:]  # After hunk
-    )
-
-    return result
 
 
 def extract_diff_from_tags(text: str) -> Optional[str]:
@@ -118,17 +82,20 @@ def extract_diff_from_tags(text: str) -> Optional[str]:
 
 def validate_diff_format(diff_text: str) -> bool:
     """
-    Validate that diff text is in proper unified diff format.
+    Validate that diff text appears to be in unified diff format.
 
     Args:
         diff_text: Diff text to validate
 
     Returns:
-        True if valid unified diff format
+        True if text contains diff markers
     """
-    try:
-        patch = PatchSet(diff_text)
-        return len(patch) > 0
-    except Exception as e:
-        logger.warning(f"Invalid diff format: {e}")
-        return False
+    # Basic validation: check for common diff markers
+    has_header = '---' in diff_text or '+++' in diff_text
+    has_hunks = '@@' in diff_text
+
+    if has_header and has_hunks:
+        return True
+
+    logger.warning(f"Diff validation failed. Has header: {has_header}, Has hunks: {has_hunks}")
+    return False
