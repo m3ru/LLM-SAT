@@ -375,6 +375,27 @@ class EvaluationPipeline:
             logger.error(f"Failed to read baseline restart.c: {e}")
             return None
 
+        # Pre-process baseline: remove the reluctant trigger check
+        # The LLM-generated diffs assume this check is already removed
+        # This is the two-line block: "if (solver->stable)\n    return kissat_reluctant_triggered (&solver->reluctant);"
+        baseline_lines = baseline_content.split('\n')
+        filtered_lines = []
+        skip_next = False
+        for i, line in enumerate(baseline_lines):
+            if skip_next:
+                skip_next = False
+                continue
+            # Check for the reluctant trigger pattern
+            if 'if (solver->stable)' in line and i + 1 < len(baseline_lines):
+                next_line = baseline_lines[i + 1]
+                if 'kissat_reluctant_triggered' in next_line:
+                    # Skip both lines
+                    skip_next = True
+                    logger.info("Removed reluctant trigger check from baseline before applying diff")
+                    continue
+            filtered_lines.append(line)
+        baseline_content = '\n'.join(filtered_lines)
+
         # Apply diff using diff_parser
         modified_content = apply_diff(baseline_content, diff_text)
 
